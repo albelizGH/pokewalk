@@ -106,6 +106,53 @@ def scheme_background(s):
     return BUILTIN_BG.get(name.lower(), "0C0C0C"), name
 
 
+HOOK = os.path.join(HERE, "pokewalk-hook.ps1")
+HOOK_MARK = "# pokewalk-hook"
+
+
+def powershell_profiles():
+    """Perfiles de PowerShell donde cargar el hook: pwsh (se crea si falta) y Windows
+    PowerShell 5.1 (solo si ya tiene perfil: no le creamos uno a quien no lo usa)."""
+    found = []
+    for exe, create in (("pwsh", True), ("powershell", False)):
+        if not shutil.which(exe):
+            continue
+        try:
+            out = subprocess.check_output([exe, "-NoProfile", "-Command", "$PROFILE"], text=True).strip()
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        if out and (create or os.path.exists(out)):
+            found.append(out)
+    return found
+
+
+def install_hook():
+    """Agrega al final del perfil la línea que carga pokewalk-hook.ps1 (al final, para
+    que envuelva el prompt de Oh My Posh/starship y no al revés)."""
+    line = f'. "{HOOK}"   {HOOK_MARK}'
+    for prof in powershell_profiles():
+        text, enc = "", "utf-8"
+        if os.path.exists(prof):
+            with open(prof, "rb") as f:
+                raw = f.read()
+            enc = "utf-8-sig" if raw.startswith(b"\xef\xbb\xbf") else "utf-8"
+            text = raw.decode(enc)
+            shutil.copy2(prof, f"{prof}.bak-pokewalk-{time.strftime('%Y%m%d-%H%M%S')}")
+        nl = "\r\n" if "\r\n" in text else "\n"
+        lines = text.splitlines(keepends=True)
+        mine = [i for i, l in enumerate(lines) if HOOK_MARK in l]
+        if mine:                                       # ya estaba: actualizar la ruta
+            lines[mine[0]] = line + nl
+        else:
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                lines[-1] += nl
+            lines += [nl, line + nl] if lines else [line + nl]
+        os.makedirs(os.path.dirname(prof), exist_ok=True)
+        with open(prof, "w", encoding=enc, newline="") as f:
+            f.write("".join(lines))
+        print("Hook de PowerShell cargado en:", prof)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Instala pokewalk en Windows Terminal")
     ap.add_argument("--scale", default="2", help="tamaño de los Pokémon (default 2)")
@@ -113,6 +160,9 @@ def main():
     ap.add_argument("--keys", default="alt+shift+p", help="atajo de teclado (default alt+shift+p)")
     ap.add_argument("--settings", help="ruta a settings.json si no lo encuentra solo")
     ap.add_argument("--no-pip", action="store_true", help="no instalar Pillow")
+    ap.add_argument("--no-hook", action="store_true",
+                    help="no tocar el perfil de PowerShell (los Pokémon no reaccionan a tus comandos)")
+    ap.add_argument("--sleep-after", default="5", help="minutos sin comandos para que se duerman (default 5, 0 = nunca)")
     args = ap.parse_args()
 
     if not args.no_pip:
@@ -135,7 +185,7 @@ def main():
     print("Copia de seguridad:", backup)
 
     bg, scheme = scheme_background(s)
-    cmd = f'"{sys.executable}" "{SCRIPT}" --sixel --bg {bg} --scale {args.scale}'
+    cmd = f'"{sys.executable}" "{SCRIPT}" --sixel --bg {bg} --scale {args.scale} --sleep-after {args.sleep_after}'
 
     profiles = s.setdefault("profiles", {})
     if isinstance(profiles, list):                    # formato viejo
@@ -185,6 +235,9 @@ def main():
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump(s, f, indent=2, ensure_ascii=False)
+
+    if not args.no_hook:
+        install_hook()
 
     print(f"\nListo. Apretá {keys.upper()} en Windows Terminal (si no anda, cerralo y abrilo).")
     print(f"Fondo usado: #{bg} ({scheme}). Necesitás Windows Terminal 1.22+ para Sixel.")
