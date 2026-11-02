@@ -28,6 +28,7 @@ import math
 import os
 import queue
 import random
+import re
 import shutil
 import signal
 import sys
@@ -136,21 +137,46 @@ def load_anim(dex, anim_name, anims_xml):
         SPRITE_URL.format(id=dex, file=f"{anim_name}-Anim.png"),
         f"{dex:04d}/{anim_name}-Anim.png"))).convert("RGBA")
 
+    rows = sheet.height // fh                       # algunas (Sleep, Faint...) no tienen 8 direcciones
+    r_right = ROW_RIGHT if rows > ROW_RIGHT else 0
+    r_left = ROW_LEFT if rows > ROW_LEFT else 0
+
     def row(r):
         return [sheet.crop((i * fw, r * fh, (i + 1) * fw, (r + 1) * fh)) for i in range(len(durs))]
 
-    return row(ROW_RIGHT), row(ROW_LEFT), durs
+    hit = a.findtext("HitFrame")                    # cuadro en que "pega": para sincronizar el daño
+    hit_t = sum(durs[:int(hit)]) if hit and hit.strip().isdigit() else None
+    return row(r_right), row(r_left), durs, hit_t
+
+
+# Animaciones extra de PMD que se usan en batalla (la primera de cada grupo que el Pokémon tenga):
+# a = ataque físico, s = ataque a distancia, c = prepararse (ataques de estado), h = recibir daño,
+# f = debilitarse, z = dormido.
+BATTLE_ANIMS = {"a": ("Attack", "QuickStrike", "Strike", "Swing"), "s": ("Shoot", "Shock", "Charge"),
+                "c": ("Charge", "Rotate"), "h": ("Hurt", "Pain", "Cringe"), "f": ("Faint",),
+                "z": ("Sleep", "EventSleep")}
 
 
 class Sprite:
-    def __init__(self, dex, scale):
+    def __init__(self, dex, scale, battle=False):
         xml = ET.fromstring(fetch(SPRITE_URL.format(id=dex, file="AnimData.xml"), f"{dex:04d}/AnimData.xml"))
         walk = load_anim(dex, "Walk", xml)
         if walk is None:
             raise ValueError("no tiene animación de caminata")
-        idle = load_anim(dex, "Idle", xml) or ([walk[0][0]], [walk[1][0]], [1.0])
+        idle = load_anim(dex, "Idle", xml) or ([walk[0][0]], [walk[1][0]], [1.0], None)
 
-        every = walk[0] + walk[1] + idle[0] + idle[1]
+        extra = {}                                  # solo en batalla: bajar estas hojas para los demás sería gastar de más
+        for code, names in (BATTLE_ANIMS.items() if battle else ()):
+            for n in names:
+                try:
+                    got = load_anim(dex, n, xml)
+                except Exception:                   # la hoja figura pero no se pudo bajar: probar la siguiente
+                    got = None
+                if got:
+                    extra[code] = got
+                    break
+
+        every = walk[0] + walk[1] + idle[0] + idle[1] + [im for e in extra.values() for im in e[0] + e[1]]
         W = max(im.width for im in every)
         H = max(im.height for im in every)
 
@@ -161,6 +187,9 @@ class Sprite:
 
         sets = {k: [norm(im) for im in v] for k, v in
                 {"wr": walk[0], "wl": walk[1], "ir": idle[0], "il": idle[1]}.items()}
+        for code, e in extra.items():
+            sets[code + "r"] = [norm(im) for im in e[0]]
+            sets[code + "l"] = [norm(im) for im in e[1]]
 
         box = None
         for frames in sets.values():
@@ -184,12 +213,17 @@ class Sprite:
 
         self.anims = {k: [prep(im) for im in v] for k, v in sets.items()}
         self.durs = {"w": walk[2], "i": idle[2]}
+        self.durs.update({c: e[2] for c, e in extra.items()})
+        self.hit = {c: e[3] for c, e in extra.items()}      # segundos hasta el cuadro de impacto (o None)
 
 
 class Pet:
+    lift = 0                                        # píxeles por encima del piso (los efectos flotan)
+
     def __init__(self, name, sprite, width, speed_mult=1.0):
         self.name = name
         self.s = sprite
+        self.hold = False                           # congelar en el último cuadro (debilitado)
         self.x = random.uniform(0, max(1, width - sprite.w))
         self.dir = random.choice((1, -1))
         self.speed = random.uniform(7, 13) * min(1.5, max(0.4, sprite.scale)) * speed_mult
@@ -203,7 +237,7 @@ class Pet:
         self.set_state("w")
 
     def set_state(self, st):
-        self.state, self.frame = st, 0
+        self.state, self.frame, self.hold = st, 0, False
         self.frame_left = self.s.durs[st][0]
         self.state_left = random.uniform(2, 7) if st == "w" else random.uniform(1, 3.5)
 
@@ -276,8 +310,12 @@ class Pet:
     def tick_frame(self, dt):
         """Avanza la animación del estado actual (sin moverlo ni cambiarlo)."""
         durs = self.s.durs[self.state]
+        if self.hold and self.frame >= len(durs) - 1:
+            return
         self.frame_left -= dt
         while self.frame_left <= 0:
+            if self.hold and self.frame >= len(durs) - 1:
+                break
             self.frame = (self.frame + 1) % len(durs)
             self.frame_left += durs[self.frame]
 
@@ -313,6 +351,14 @@ class Loader:
 
 
 # --------------------------------------------------------------------------- teclado sin bloquear
+# Teclas de edición del prompt. Son strings no imprimibles, así que nunca se confunden con texto escrito.
+K_LEFT, K_RIGHT, K_HOME, K_END, K_DEL = "\x00L", "\x00R", "\x00H", "\x00E", "\x00D"
+WIN_EDIT_KEYS = {"K": K_LEFT, "M": K_RIGHT, "G": K_HOME, "O": K_END, "S": K_DEL}
+ANSI_EDIT_KEYS = {"\x1b[D": K_LEFT, "\x1bOD": K_LEFT, "\x1b[C": K_RIGHT, "\x1bOC": K_RIGHT,
+                  "\x1b[H": K_HOME, "\x1bOH": K_HOME, "\x1b[1~": K_HOME, "\x1b[F": K_END, "\x1bOF": K_END,
+                  "\x1b[4~": K_END, "\x1b[3~": K_DEL}
+
+
 class Keys:
     def __init__(self):
         self.win = os.name == "nt"
@@ -331,8 +377,10 @@ class Keys:
         if self.win:
             while self.m.kbhit():
                 ch = self.m.getwch()
-                if ch in ("\x00", "\xe0"):      # flechas/F1..: descartar
-                    self.m.getwch()
+                if ch in ("\x00", "\xe0"):      # teclas especiales: las de edición se pasan, el resto se descarta
+                    tok = WIN_EDIT_KEYS.get(self.m.getwch())
+                    if tok:
+                        out.append(tok)
                     continue
                 out.append(ch)
         else:
@@ -341,7 +389,13 @@ class Keys:
                 data = os.read(self.fd, 64).decode("utf-8", "ignore")
                 if not data:
                     break
-                out.extend(data)
+                for piece in re.split(r"(\x1b\[[0-9;]*[A-Za-z~]|\x1bO[A-Za-z])", data):
+                    if piece.startswith(("\x1b[", "\x1bO")) and len(piece) > 2:
+                        tok = ANSI_EDIT_KEYS.get(piece)
+                        if tok:
+                            out.append(tok)
+                    else:
+                        out.extend(piece)
         return out
 
     def restore(self):
@@ -498,7 +552,7 @@ def render(pets, cols, rows, reserve=1):
     canvas = [[None] * cols for _ in range(ph)]
     for p in sorted(pets, key=lambda p: p.s.h, reverse=True):
         data, w, h = p.pixels()
-        ox, oy = int(p.x), ph - h
+        ox, oy = int(p.x), max(0, ph - h - p.lift)
         for y in range(h):
             row = canvas[oy + y]
             base = y * w
@@ -552,7 +606,7 @@ def render_sixel(pets, cols, rows, bg, cell_w=10, cell_h=20, reserve=1):
     px = {}
     for p in sorted(pets, key=lambda p: p.s.h, reverse=True):
         data, w, h = p.pixels()
-        ox, oy = int(p.x), H - h
+        ox, oy = int(p.x), max(0, H - h - p.lift)
         for y in range(h):
             yy = oy + y
             if yy < 0:
@@ -644,6 +698,32 @@ def find_pet(pets, term):
     return None
 
 
+PROMPTS = {
+    "add": "Agregar (nombre o número, Enter)",
+    "set": "Cambiar todos (separados por espacio, Enter)",
+    "del": "Sacar (nombre, número o principio del nombre; Enter solo = el último)",
+    "battle": "Batalla (pika char = 1 vs 1;  pika char vs mew snor = equipos;  Enter solo = 3 vs 3 al azar)",
+    "pet": "Mimar a (nombre, número o principio; Enter solo = uno al azar)",
+    "info": "Info de (nombre, número o principio; Enter solo = uno que camina)",
+}
+
+
+def prompt_line(label, buf, cur, cols):
+    """Línea de entrada con cursor (video inverso). Lo escrito siempre se ve: si no entra, primero se
+    acorta la etiqueta y, si hace falta, se desplaza una ventana sobre el texto."""
+    width = max(8, cols - 1)
+    room = max(10, width - len(label) - 2)
+    if len(buf) + 1 > room:
+        keep = width - (len(buf) + 1) - 3
+        label = label[:keep] + "…" if keep >= 6 else label[:6] + "…"
+        room = max(10, width - len(label) - 2)
+    start = max(0, cur - room + 1) if len(buf) + 1 > room else 0
+    seen = buf[start:start + room]
+    k = cur - start
+    view = seen[:k] + "\x1b[7m" + (seen[k:k + 1] or " ") + "\x1b[27m" + seen[k + 1:]
+    return f"\x1b[1;1H\x1b[2K\x1b[97m{label}: {view}\x1b[0m"
+
+
 def status_line(text, cols, bright=False):
     text = text[:max(0, cols - 1)]
     color = "\x1b[97m" if bright else "\x1b[90m"
@@ -654,52 +734,140 @@ def status_line(text, cols, bright=False):
 PET_LINES = ["<3", "¡Hola!", "¿Jugamos?", "¡Me encanta caminar!", "¡Qué lindo día!", "¿Me das una baya?", "¡Presente!"]
 
 
-def prepare_battle(names, loader, jobs):
-    """Hilo: busca en PokeAPI stats y ataques de ambos (más la tabla de tipos) y baja los sprites.
-    Cuando está todo listo avisa a la pantalla; mientras tanto la animación sigue."""
-    def build(name):
-        dex, key = resolve(name)
-        if dex not in loader.cache:
-            loader.cache[dex] = Sprite(dex, loader.scale)
-        return pb.load_fighter(fetch, dex, key), loader.cache[dex]
+def expand_name(term, walking):
+    """Nombre completo para lo que escribió el usuario: un nombre o número válido se respeta tal cual
+    (así `mew` no se confunde con `mewtwo`); si no, vale el principio del nombre de uno que camina (`pika`)."""
+    t = term.strip().lower()
+    if t in walking:
+        return t
     try:
-        with ThreadPoolExecutor(2) as ex:
-            built = list(ex.map(build, names))
+        resolve(t)
+        return t
+    except Exception:
+        pass
+    return next((n for n in reversed(walking) if n.startswith(t)), t)
+
+
+def prepare_battle(sides, loader, jobs, walking=()):
+    """Hilo: busca en PokeAPI stats y ataques de todos los Pokémon de ambos equipos (más la tabla de
+    tipos) y baja los sprites. Cuando está todo listo avisa a la pantalla; mientras tanto la animación sigue."""
+    def build(name):
+        dex, key = resolve(expand_name(name, walking))
+        if (dex, "batalla") not in loader.cache:         # versión con las animaciones de combate
+            loader.cache[(dex, "batalla")] = Sprite(dex, loader.scale, battle=True)
+        return pb.load_fighter(fetch, dex, key), loader.cache[(dex, "batalla")]
+    try:
+        with ThreadPoolExecutor(4) as ex:
+            built = list(ex.map(build, [n for side in sides for n in side]))
+        teams, sprites, k = [], [], 0
+        for side in sides:
+            chunk = built[k:k + len(side)]
+            k += len(side)
+            teams.append([f for f, _ in chunk])
+            sprites.append([s for _, s in chunk])
         chart = pb.TypeChart(fetch)
-        chart.preload({m.type for f, _ in built for m in f.moves})
-        jobs.put(("battle", pb.Battle(built[0][0], built[1][0], chart), [s for _, s in built]))
+        chart.preload({m.type for team in teams for f in team for m in f.moves})
+        jobs.put(("battle", pb.Battle(teams[0], teams[1], chart), sprites))
     except Exception as e:     # sin internet, nombre inválido, sprite faltante...
         jobs.put(("berror", f"No pude preparar la batalla: {e}", 6))
 
 
-def lookup_info(term, jobs):
+def lookup_info(term, jobs, walking=()):
     """Hilo: tipo y stats de un Pokémon (tecla i)."""
     try:
-        dex, key = resolve(term)
-        jobs.put(("flash", pb.describe(fetch, dex, key), 12))
+        dex, key = resolve(expand_name(term, walking))
+        jobs.put(("flash", "[Esc] " + pb.describe(fetch, dex, key), 12))
     except Exception as e:
-        jobs.put(("error", f"No pude: {term}: {e}", 6))
+        jobs.put(("ierror", f"No pude: {term}: {e}", 6))
+
+
+TYPE_COLORS = {
+    "normal": (200, 200, 190), "fire": (255, 140, 40), "water": (70, 140, 255), "electric": (255, 225, 60),
+    "grass": (90, 200, 80), "ice": (140, 230, 245), "fighting": (210, 70, 50), "poison": (170, 80, 200),
+    "ground": (200, 160, 90), "flying": (160, 170, 250), "psychic": (255, 100, 160), "bug": (170, 200, 50),
+    "rock": (190, 170, 110), "ghost": (110, 80, 170), "dragon": (110, 60, 240), "dark": (90, 80, 90),
+    "steel": (180, 190, 210), "fairy": (250, 160, 220),
+}
+
+
+class Fx:
+    """Proyectil ("orb") o destello ("burst") del color del tipo del ataque. Se dibuja como un
+    Pokémon más: tiene x, lift (altura sobre el piso), s.w/s.h y pixels() (ver render*)."""
+    lift = 0
+
+    def __init__(self, kind, color, size):
+        self.x, self.size = 0.0, size
+        self.s = type("FxSprite", (), {"w": size, "h": size})()
+        c, r = size / 2 - 0.5, size / 2
+        thick = max(1.0, size / 10)
+        data = []
+        for y in range(size):
+            for x in range(size):
+                dx, dy = x - c, y - c
+                d = (dx * dx + dy * dy) ** 0.5
+                if kind == "orb":
+                    on, core = d <= r, d <= r * 0.5
+                else:                                   # estrella de 8 puntas
+                    ax, ay = abs(dx), abs(dy)
+                    on = (d <= r and (ax <= thick or ay <= thick or abs(ax - ay) <= thick)) or d <= r * 0.4
+                    core = d <= r * 0.3
+                data.append((255, 255, 255, 255) if core and on else (*color, 255) if on else (0, 0, 0, 0))
+        self._px = (data, size, size)
+
+    def pixels(self):
+        return self._px
 
 
 class BattleScene:
-    """Dos Pokémon enfrentados con barras de HP, menú de ataques y animación de cada golpe.
-    Tomás el control del primero (1-4 para atacar); `a` alterna piloto automático."""
+    """Batalla por equipos: dos Pokémon enfrentados, barras de HP, y el menú de los juegos
+    (Luchar / Pokémon / Huir, sin Mochila). `a` alterna piloto automático.
+    Cada ataque usa las animaciones de PMD del Pokémon (Attack / Shoot / Charge, Hurt, Faint, Sleep) y,
+    si tiene sentido, un proyectil y un destello del color del tipo."""
 
     def __init__(self, battle, sprites, ppc):
-        self.b = battle
-        self.ppc = ppc                       # píxeles por columna del "mundo"
-        self.pets = []
-        for i, (f, s) in enumerate(zip(battle.f, sprites)):
-            p = Pet(f.name, s, 1)
-            p.dir = 1 if i == 0 else -1      # se miran entre sí
-            p.set_state("i")
-            self.pets.append(p)
-        self.shown = [float(f.hp) for f in battle.f]    # HP que se dibuja (baja suave)
-        self.target = list(self.shown)
+        self.b, self.sprites, self.ppc = battle, sprites, ppc     # sprites[lado][índice en el equipo]
+        self.active = [0, 0]
+        self.pets = [self._mkpet(0, 0), self._mkpet(1, 0)]
         self.hidden = [False, False]
-        self.auto, self.wait, self.over_t = False, 0.0, 0.0
-        self.msg = ""
-        self._start([pb.Step(f"¡{battle.f[0].name} vs {battle.f[1].name}!", dur=1.6)])
+        self.shown = [float(battle.fighter(s).hp) for s in (0, 1)]    # HP que se dibuja (baja suave)
+        self.target = list(self.shown)
+        self.shake = [0.0, 0.0]
+        self.auto, self.wait, self.over_t, self.forced = False, 0.0, 0.0, False
+        self.note, self.note_t = "", 0.0
+        self.anim_left = [0.0, 0.0]                    # lo que le queda a la animación de acción de cada lado
+        self.down = [False, False]                     # debilitado y tirado en el piso
+        self.fx, self.hit_t, self.dur_eff, self.lunge = [], 0.0, 0.0, False
+        self._apply(battle.snap())
+        a, b = battle.teams
+        intro = f"¡{a[0].name} vs {b[0].name}!" if len(a) == len(b) == 1 else \
+            f"¡Batalla de equipos! {len(a)} contra {len(b)}"
+        self._start([pb.Step(intro, dur=1.8)])
+
+    def _mkpet(self, s, i):
+        p = Pet(self.b.teams[s][i].name, self.sprites[s][i], 1)
+        p.dir = 1 if s == 0 else -1          # se miran entre sí
+        p.set_state("i")
+        return p
+
+    def _apply(self, snap):
+        """Lleva lo dibujado al estado `snap` (cambio de Pokémon, HP, estados)."""
+        for s, (a, st, conf, hps) in enumerate(snap):
+            if a != self.active[s]:
+                self.active[s] = a
+                self.pets[s] = self._mkpet(s, a)
+                self.hidden[s] = self.down[s] = False
+                self.anim_left[s] = 0.0
+                self.shown[s] = float(hps[a])
+            elif hps[a] < self.target[s] and not self.down[s]:      # le pegaron
+                pet = self.pets[s]
+                if "h" in pet.s.durs:
+                    pet.set_state("h")
+                    self.anim_left[s] = sum(pet.s.durs["h"]) + 0.05
+                else:
+                    self.shake[s] = 0.45                             # sin animación: tiembla
+            self.target[s] = float(hps[a])
+        self.status = [(x[1], x[2]) for x in snap]
+        self.team_hp = [x[3] for x in snap]
 
     # --- turnos
     def _start(self, steps):
@@ -709,106 +877,250 @@ class BattleScene:
     def _begin(self):
         st = self.steps[self.step_i]
         self.msg, self.step_t, self.applied = st.text, 0.0, False
+        self.fx, self.lunge = [], False
+        self.hit_t = 0.25 if st.atk is not None else 0.0     # cuándo cae el daño dentro del paso
+        self.dur_eff = st.dur
         if st.faint is not None:
-            self.hidden[st.faint] = True
+            pet = self.pets[st.faint]
+            if "f" in pet.s.durs:                            # se cae y queda tirado hasta que lo reemplacen
+                pet.set_state("f")
+                pet.hold = True
+                self.down[st.faint] = True
+            else:
+                self.hidden[st.faint] = True
+        if st.atk is not None and st.move is not None:
+            self._attack_fx(st)
 
-    def _pick(self, mv):
-        self._start(self.b.turn(mv))
+    def _attack_fx(self, st):
+        """Elige la animación del atacante según el ataque y programa proyectil / impacto."""
+        s, mv = st.atk, st.move
+        pet = self.pets[s]
+        spr = pet.s
+        codes = ("c",) if not mv.power else ("s", "a") if mv.special else ("a",)
+        code = next((c for c in codes if c in spr.durs), None)
+        ranged = bool(mv.power and mv.special) or (not mv.power and st.tgt != s)
+        d = sum(spr.durs[code]) if code else 0.4
+        if code:
+            pet.set_state(code)
+            self.anim_left[s] = d + 0.05
+        if ranged:
+            go = 0.4 * d if code else 0.1                     # el proyectil sale a mitad de la animación
+            self.hit_t = go + 0.45
+        elif mv.power:
+            self.hit_t = max(0.15, (spr.hit.get(code) if code else None) or 0.6 * d)
+        else:
+            self.hit_t = 0.5 * d
+        self.lunge = bool(mv.power) and (not ranged or code is None)
+        self.dur_eff = max(st.dur, self.hit_t + 0.6, d + 0.2)
+        color = TYPE_COLORS.get(mv.type, (255, 255, 255))
+        size = max(8, spr.h // 4)
+        if ranged:
+            self.fx.append({"obj": Fx("orb", color, size), "t0": go, "t1": self.hit_t, "kind": "orb",
+                            "src": s, "dst": st.tgt})
+        if not st.miss:
+            big = max(10, min(44, spr.h // 2))
+            self.fx.append({"obj": Fx("burst", color, big), "t0": self.hit_t, "t1": self.hit_t + 0.4,
+                            "kind": "burst", "src": s, "dst": st.tgt})
+
+    def _act(self, action):
+        self._start(self.b.turn(action))
+
+    def _finish(self):
+        b = self.b
+        self.wait = 0.8
+        if b.over:
+            self.phase, self.over_t = "over", 0.0
+            who = "¡Ganó tu equipo!" if b.winner == 0 else "¡Ganó el equipo rival!" if b.winner == 1 else "¡Empate!"
+            self.msg = who + "   Enter: volver"
+        elif b.pending[0]:
+            self.phase, self.forced = "switch", True
+        else:
+            self.phase, self.forced = "main", False
 
     def _play(self, dt):
         st = self.steps[self.step_i]
         self.step_t += dt
-        if st.hp and not self.applied and self.step_t >= 0.25:      # el golpe llega
-            self.target, self.applied = [float(h) for h in st.hp], True
-        if self.step_t >= st.dur:
+        if st.snap and not self.applied and self.step_t >= self.hit_t:
+            self._apply(st.snap)
+            self.applied = True
+        if self.step_t >= self.dur_eff:
             self.step_i += 1
             if self.step_i < len(self.steps):
                 self._begin()
-            elif self.b.winner is not None:
-                self.phase, self.over_t = "over", 0.0
-                self.msg = f"¡Ganó {self.b.f[self.b.winner].name}!   Enter: volver"
             else:
-                self.phase, self.wait, self.msg = "choose", 0.8, ""
+                self._finish()
 
+    def _tell(self, text):
+        self.note, self.note_t = text, 1.8
+
+    # --- teclado
     def key(self, ch):
         """Devuelve "done" (terminó la batalla) / "flee" (huiste) / None."""
-        c = ch.lower()
+        c, b = ch.lower(), self.b
         if self.phase == "over":
             return "done" if ch in ("\r", "\n", " ", "\x1b") or c == "q" else None
-        if c == "q" or ch == "\x1b":
+        if c == "q":
             return "flee"
         if c == "a":
             self.auto = not self.auto
             self.wait = 0.3
-        elif self.phase == "choose" and c in ("1", "2", "3", "4"):
-            i = int(c) - 1
-            if i < len(self.b.f[0].moves):
-                self._pick(self.b.f[0].moves[i])
+            return None
+        back = c == "0" or ch in ("\x1b", "\x08", "\x7f")
+        mine = b.fighter(0)
+        if self.phase == "main":
+            if c == "1":
+                self.phase = "fight"
+            elif c == "2":
+                if len(b.alive(0)) > 1:
+                    self.phase = "switch"
+                else:
+                    self._tell("¡No tenés más Pokémon para cambiar!")
+            elif c == "3":
+                return "flee"
+        elif self.phase == "fight":
+            if back:
+                self.phase = "main"
+            elif c in ("1", "2", "3", "4"):
+                i = int(c) - 1
+                if not any(p > 0 for p in mine.pp):           # sin PP: Forcejeo
+                    if i == 0:
+                        self._act(("move", -1))
+                elif i < len(mine.moves):
+                    if mine.pp[i] <= 0:
+                        self._tell("¡No quedan PP para ese ataque!")
+                    else:
+                        self._act(("move", i))
+        elif self.phase == "switch":
+            if back and not self.forced:
+                self.phase = "main"
+            elif c in ("1", "2", "3", "4", "5", "6") and int(c) <= len(b.teams[0]):
+                i = int(c) - 1
+                f = b.teams[0][i]
+                if f.hp <= 0:
+                    self._tell(f"¡{f.name} no puede combatir!")
+                elif i == b.active[0]:
+                    self._tell(f"¡{f.name} ya está en combate!")
+                elif self.forced:
+                    self._start(b.send(i))
+                else:
+                    self._act(("switch", i))
         return None
 
     def update(self, dt, cols):
         for p in self.pets:
             p.tick_frame(dt)
-        for i, f in enumerate(self.b.f):                    # las barras bajan de a poco
+        for s in (0, 1):                                    # las barras bajan de a poco
+            f = self.b.teams[s][self.active[s]]
             step = max(1.0, f.max_hp) * 1.2 * dt
-            self.shown[i] += max(-step, min(step, self.target[i] - self.shown[i]))
+            self.shown[s] += max(-step, min(step, self.target[s] - self.shown[s]))
+            self.shake[s] = max(0.0, self.shake[s] - dt)
+        self.note_t -= dt
+        for s in (0, 1):                                    # terminada la acción: vuelve a idle (o a dormir)
+            if self.anim_left[s] > 0:
+                self.anim_left[s] -= dt
+            elif not self.down[s]:
+                pet = self.pets[s]
+                want = "z" if self.status[s][0] == "sleep" and "z" in pet.s.durs else "i"
+                if pet.state != want:
+                    pet.set_state(want)
         if self.phase == "play":
             self._play(dt)
-        elif self.phase == "choose" and self.auto:
-            self.wait -= dt
-            if self.wait <= 0:
-                self._pick(self.b.ai_move(0))
         elif self.phase == "over":
             self.over_t += dt
-            if self.over_t > 12:                            # se aburrió de esperar
+            if self.over_t > 15:                            # se aburrió de esperar
                 return "done"
+        elif self.auto:
+            self.wait -= dt
+            if self.wait <= 0:
+                if self.phase == "switch" and self.forced:
+                    self._start(self.b.send(self.b.best_replacement(0)))
+                elif self.phase == "switch":
+                    self.phase = "main"
+                else:
+                    self.phase = "main"
+                    self._act(self.b.ai_action(0))
         world = cols * self.ppc
-        for i, p in enumerate(self.pets):
-            x = 2 * self.ppc if i == 0 else world - p.s.w - 2 * self.ppc
+        for s, p in enumerate(self.pets):
+            x = 2 * self.ppc if s == 0 else world - p.s.w - 2 * self.ppc
             if self.phase == "play":
                 st, t = self.steps[self.step_i], self.step_t
-                if st.atk == i:                             # embiste y vuelve
-                    k = t / 0.25 if t < 0.25 else max(0.0, (0.5 - t) / 0.25)
-                    x += 4 * self.ppc * k * (1 if i == 0 else -1)
-                elif st.atk is not None and st.hp is not None and 0.25 <= t < 0.7:
-                    x += self.ppc * (1 if int(t * 25) % 2 else -1)   # tiembla el golpeado
+                if st.atk == s and self.lunge:              # embiste hasta el impacto y vuelve
+                    th = self.hit_t
+                    k = min(1.0, t / (th * 0.8)) if t < th else max(0.0, 1 - (t - th) / 0.25)
+                    x += 3 * self.ppc * k * (1 if s == 0 else -1)
+            if self.shake[s] > 0:
+                x += self.ppc * (1 if int(self.shake[s] * 50) % 2 else -1)
             p.x = max(0, x)
+        for e in self.fx:                                   # proyectil: del atacante al rival; destello: sobre el rival
+            o, src, dst = e["obj"], self.pets[e["src"]], self.pets[e["dst"]]
+            if e["kind"] == "orb":
+                k = (self.step_t - e["t0"]) / max(1e-6, e["t1"] - e["t0"])
+                x0 = src.x + (src.s.w if e["src"] == 0 else -o.size)
+                o.x = x0 + (dst.x + dst.s.w / 2 - o.size / 2 - x0) * max(0.0, min(1.0, k))
+                o.lift = max(0, src.s.h // 2 - o.size // 2)
+            else:
+                o.x = dst.x + dst.s.w / 2 - o.size / 2
+                o.lift = max(0, dst.s.h // 2 - o.size // 2)
         return None
 
     def visible(self):
-        return [p for p, h in zip(self.pets, self.hidden) if not h]
+        live = [e["obj"] for e in self.fx if self.phase == "play" and e["t0"] <= self.step_t < e["t1"]]
+        return [p for p, h in zip(self.pets, self.hidden) if not h] + live
 
     # --- texto
-    def _bar(self, i, cols):
-        f = self.b.f[i]
-        hp = max(0, math.ceil(self.shown[i] - 1e-6))
+    def _bar(self, s, cols):
+        team = self.b.teams[s]
+        f = team[self.active[s]]
+        hp = max(0, math.ceil(self.shown[s] - 1e-6))
         ratio = hp / f.max_hp
-        bw = 10 if cols >= 70 else 5
+        bw = 8 if cols >= 90 else 5 if cols >= 60 else 3
         fill = min(bw, max(1 if hp else 0, round(bw * ratio)))
         color = 32 if ratio > 0.5 else 33 if ratio > 0.2 else 31
-        tail = f"] {hp}/{f.max_hp}"
-        plain = f"{f.name} [" + "█" * fill + "░" * (bw - fill) + tail
-        ansi = (f"\x1b[97m{f.name}\x1b[0m [\x1b[{color}m" + "█" * fill + "\x1b[90m" + "░" * (bw - fill)
-                + "\x1b[0m" + tail)
+        st, conf = self.status[s]
+        tag = (" " + pb.STATUS_TAG[st] if st else "") + (" CNF" if conf else "")
+        right = f"] {hp}/{f.max_hp}"
+        dots = [h > 0 for h in self.team_hp[s]]
+        plain = f"{f.name}{tag} [" + "█" * fill + "░" * (bw - fill) + right + \
+            (" " + "●" * len(dots) if len(dots) > 1 else "")
+        ansi = (f"\x1b[97m{f.name}\x1b[33m{tag}\x1b[0m [\x1b[{color}m" + "█" * fill + "\x1b[90m" + "░" * (bw - fill)
+                + "\x1b[0m" + right)
+        if len(dots) > 1:
+            ansi += " " + "".join("\x1b[32m●" if d else "\x1b[90m○" for d in dots) + "\x1b[0m"
         return plain, ansi
 
     def menu(self):
-        me, rival = self.b.f
+        b = self.b
+        me, foe = b.fighter(0), b.fighter(1)
+        if self.phase == "main":
+            return f"¿Qué hará {me.name}?   1 Luchar   2 Pokémon   3 Huir   (a: automático)"
+        if self.phase == "fight":
+            if not any(p > 0 for p in me.pp):
+                return "1 Forcejeo (sin PP)   0 volver"
+            parts = []
+            for i, m in enumerate(me.moves):
+                kind = "estado" if not m.power else f"{m.power}"
+                e = b.chart.mult(m.type, foe.types) if m.power else 1
+                tag = "" if e == 1 else " x2" if e > 1 else " x½" if e > 0 else " x0"
+                parts.append(f"{i + 1} {m.name} {me.pp[i]}/{m.pp} ({pb.TYPES_ES[m.type][:4]} {kind}{tag})")
+            return "  ".join(parts) + "   0 volver"
         parts = []
-        for i, mv in enumerate(me.moves):
-            e = self.b.chart.mult(mv.type, rival.types)
-            tag = "" if e == 1 else " x2" if e > 1 else " x½" if e > 0 else " x0"
-            parts.append(f"{i + 1} {mv.name} ({pb.TYPES_ES[mv.type][:4]} {mv.power}{tag})")
-        return "  ".join(parts) + "   a auto  q huir"
+        for i, f in enumerate(b.teams[0]):
+            state = " K.O." if f.hp <= 0 else " (en combate)" if i == b.active[0] else ""
+            parts.append(f"{i + 1} {f.name} {f.hp}/{f.max_hp}{state}")
+        return ("¡Elegí al próximo!  " if self.forced else "") + "  ".join(parts) + ("" if self.forced else "   0 volver")
 
     def hud(self, cols):
-        """Fila 1: barras de HP (vos a la izquierda, rival a la derecha). Fila 2: mensaje o menú."""
+        """Fila 1: barras de HP, estado y equipo (vos a la izquierda, rival a la derecha). Fila 2: mensaje o menú."""
         (lp, la), (rp, ra) = self._bar(0, cols), self._bar(1, cols)
         out = f"\x1b[1;1H\x1b[2K{la}\x1b[1;{max(len(lp) + 2, cols - len(rp))}H{ra}"
-        if self.phase == "choose":
-            text = self.menu() if not self.auto else "Piloto automático   (a: tomar el control   q: huir)"
-        else:
+        if self.phase in ("play", "over"):
             text = self.msg
+        elif self.note_t > 0:
+            text = self.note
+        elif self.auto:
+            text = "Piloto automático   (a: tomar el control   q: huir)"
+        else:
+            text = self.menu()
         return out + f"\x1b[2;1H\x1b[2K\x1b[97m{text[:max(0, cols - 1)]}\x1b[0m"
 
 
@@ -879,7 +1191,8 @@ def main():
     cols, rows = shutil.get_terminal_size()
     pets = []
     mode = None            # None | "add" | "set"
-    buf = ""
+    buf, cur = "", 0       # texto del prompt y posición del cursor
+    last_input, prompt_err = {}, ""
     msg, msg_until = "Cargando...", time.time() + 30
     tick = 1 / max(5, args.fps)
     last = time.perf_counter()
@@ -910,22 +1223,60 @@ def main():
             sleepers[0].say("¡Ah! ¡Volviste!" if not found else "¿Eh? ¿Qué pasó?", 3)
 
     def start_battle(parts):
-        """Tecla b: vos + rival. Lo que falte se completa con los que caminan, o al azar."""
+        """Tecla b. `pika char vs mew snor` = tu equipo vs el rival (hasta 6 por lado); `pika char` = 1 contra 1.
+        El lado vacío se arma con los que caminan o al azar; sin nada, 3 contra 3."""
         nonlocal battling
         if battling:
             return
-        names = parts[:2]
-        while len(names) < 2:
-            free = [p.name for p in pets if p.name not in names]
-            names.append(random.choice(free) if free else str(random.randint(1, 493)))
+        low = [x.lower() for x in parts]
+        if "vs" in low:
+            i = low.index("vs")
+            mine, rival = parts[:i], parts[i + 1:]
+        elif len(parts) <= 2:
+            mine, rival = parts[:1], parts[1:]
+        else:
+            flash("Para equipos usá vs:  pika char vs mew snor   (hasta 6 por lado)", 6)
+            return
+        if max(len(mine), len(rival)) > 6:
+            flash("Hasta 6 Pokémon por equipo", 4)
+            return
+        walking = [p.name for p in pets]
+        mine, rival = ([expand_name(n, walking) for n in team] for team in (mine, rival))
+        size = max(len(mine), len(rival)) or 3
+        used = set(mine + rival)
+        for team in (mine, rival):
+            while not team:
+                for _ in range(size):
+                    free = [n for n in walking if n not in used]
+                    pick = random.choice(free) if free else str(random.randint(1, 493))
+                    team.append(pick)
+                    used.add(pick)
         battling = True
-        flash(f"Buscando en internet a {names[0]} y {names[1]}...", 60)
-        threading.Thread(target=prepare_battle, args=(names, loader, jobs), daemon=True).start()
+        flash(f"Buscando en internet {', '.join(mine)} vs {', '.join(rival)}... (la primera vez tarda)", 90)
+        threading.Thread(target=prepare_battle, args=([mine, rival], loader, jobs, walking), daemon=True).start()
 
     def start_info(parts):
         term = parts[0] if parts else (random.choice(pets).name if pets else str(random.randint(1, 493)))
         flash(f"Buscando a {term}...", 30)
-        threading.Thread(target=lookup_info, args=(term, jobs), daemon=True).start()
+        threading.Thread(target=lookup_info, args=(term, jobs, [p.name for p in pets]), daemon=True).start()
+
+    def pet_them(parts):
+        """Tecla h: mima a los nombrados (nombre, número o principio del nombre); Enter solo = uno al azar."""
+        targets, missing = [], []
+        for term in parts:
+            i = find_pet(pets, term)
+            if i is None:
+                missing.append(term)
+            else:
+                targets.append(pets[i])
+        if not parts and pets:
+            targets = [random.choice(pets)]
+        for p in targets:
+            p.wake_up()
+            p.cheer()
+            p.say(f"{pb.pretty(p.name)}: {random.choice(PET_LINES)}", 3)
+        if missing:
+            flash("No está: " + ", ".join(missing), 3)
 
     def end_scene(how):
         nonlocal scene
@@ -945,9 +1296,13 @@ def main():
                 if job[0] == "battle":
                     battling, scene, redraw = False, BattleScene(job[1], job[2], px_per_col), True
                     flash("", 0)
-                else:                                           # "flash" | "error" | "berror"
+                else:                                           # "flash" | "error" | "berror" | "ierror"
                     battling = battling and job[0] != "berror"
                     flash(job[1], job[2])
+                    again = {"berror": "battle", "ierror": "info"}.get(job[0])
+                    if again and mode is None and not scene:    # falló un nombre: reabrir con lo escrito, para corregir
+                        mode, buf, prompt_err = again, last_input.get(again, ""), job[1].rsplit(": ", 1)[-1]
+                        cur = len(buf)
 
             # --- resultados de cargas
             while not loader.done.empty():
@@ -986,8 +1341,10 @@ def main():
                         redraw = True
                     continue
                 if mode:
+                    cur = min(cur, len(buf))
                     if ch in ("\r", "\n"):
                         parts = buf.split()
+                        last_input[mode], prompt_err = buf, ""      # por si falla un nombre: se reabre con esto
                         if mode == "del":
                             gone, missing = [], []
                             for term in (parts or [None]):
@@ -1007,19 +1364,34 @@ def main():
                             start_battle(parts)
                         elif mode == "info":
                             start_info(parts)
+                        elif mode == "pet":
+                            pet_them(parts)
                         elif parts:
                             loader.request(parts, replace=(mode == "set"))
                             flash("Cargando " + ", ".join(parts) + "...", 30)
                         mode, buf = None, ""
                     elif ch == "\x1b":
-                        mode, buf = None, ""
+                        mode, buf, prompt_err = None, "", ""
                     elif ch in ("\x08", "\x7f"):
-                        buf = buf[:-1]
+                        if cur:
+                            buf, cur = buf[:cur - 1] + buf[cur:], cur - 1
+                    elif ch == K_DEL:
+                        buf = buf[:cur] + buf[cur + 1:]
+                    elif ch == K_LEFT:
+                        cur = max(0, cur - 1)
+                    elif ch == K_RIGHT:
+                        cur = min(len(buf), cur + 1)
+                    elif ch == K_HOME:
+                        cur = 0
+                    elif ch == K_END:
+                        cur = len(buf)
                     elif ch.isprintable():
-                        buf += ch
+                        buf, cur = buf[:cur] + ch + buf[cur:], cur + 1
                 else:
                     c = ch.lower()
-                    if c == "q":
+                    if ch in ("\x1b", "\r", "\n"):
+                        msg_until = 0.0                 # cierra el mensaje (info, errores...)
+                    elif c == "q":
                         bye()
                     elif c == "a":
                         mode, buf = "add", ""
@@ -1035,10 +1407,7 @@ def main():
                     elif c == "i":
                         mode, buf = "info", ""
                     elif c == "h" and pets:
-                        p = random.choice(pets)
-                        p.wake_up()
-                        p.cheer()
-                        p.say(random.choice(PET_LINES), 3)
+                        mode, buf = "pet", ""
 
             # --- tamaño
             size = shutil.get_terminal_size()
@@ -1065,18 +1434,9 @@ def main():
                 p.update(dt, cols * px_per_col, idle, sleep_after)
 
             # --- línea de estado
-            if mode == "add":
-                status = status_line(f"Agregar (nombre o número, Enter): {buf}█", cols, True)
-            elif mode == "set":
-                status = status_line(f"Cambiar todos (separados por espacio, Enter): {buf}█", cols, True)
-            elif mode == "del":
-                status = status_line(f"Sacar (nombre, número o el principio del nombre; Enter solo = el último): {buf}█",
-                                     cols, True)
-            elif mode == "battle":
-                status = status_line(f"Batalla: vos y rival (nombres; Enter solo = al azar entre los que caminan): {buf}█",
-                                     cols, True)
-            elif mode == "info":
-                status = status_line(f"Info de (nombre o número; Enter solo = uno que camina): {buf}█", cols, True)
+            if mode:
+                label = f"{prompt_err}  →  corregí y Enter (Esc cancela)" if prompt_err else PROMPTS[mode]
+                status = prompt_line(label, buf, cur, cols)
             elif time.time() < msg_until:
                 status = status_line(msg, cols, True)
             else:

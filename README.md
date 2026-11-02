@@ -64,20 +64,41 @@ El hook envuelve `prompt` sin alterar `$?` ni `$LASTEXITCODE`, así que convive 
 
 | Tecla | Qué hace |
 |---|---|
-| `b` | **batalla**: escribís tu Pokémon y el rival (`pikachu charmander`). Si falta alguno, lo completa con los que caminan o al azar |
+| `b` | **batalla** por equipos (abajo): `pika char` = 1 contra 1, `pika char vs mew snor` = equipos de hasta 6, Enter solo = 3 contra 3 al azar |
 | `i` | **info**: tipo, stats base, altura y peso de un Pokémon (Enter solo = uno que camina) |
-| `h` | **mimar**: uno de los que caminan se alegra y te dice algo |
+| `h` | **mimar**: escribís a quién (nombre, número o el principio: `pika`; varios con espacio) y se alegra y te dice algo. Enter solo = uno al azar |
 
-En la batalla controlás al primero con `1`-`4` (ataques, con `x2` / `x½` / `x0` si el rival es débil, resiste o es inmune), `a` alterna piloto
-automático (se pelean solos), `q` huye, Enter vuelve cuando termina.
+### La batalla
 
-Los datos se buscan en [PokéAPI](https://pokeapi.co) **en el momento**: stats base, 4 ataques que el Pokémon puede aprender
-(en español, con poder y precisión) y la tabla de tipos. Hace falta internet la primera vez; después queda en caché
-(`%LOCALAPPDATA%\pokewalk\api`). Nivel 50, fórmula de daño de los juegos (STAB, efectividad, críticos, variación),
-HP duplicado para que duren más de 2 golpes. Solo ataques que hacen daño: sin estados, clima ni objetos.
+Como en los juegos, **sin objetos**: cada turno elegís **1 Luchar**, **2 Pokémon** (cambiar) o **3 Huir**.
 
-El rival **no usa IA**: casi siempre elige el ataque de mayor daño esperado (la misma fórmula) y a veces uno al azar
-(`Battle.ai_move` en `pokebattle.py`).
+| Tecla | Qué hace |
+|---|---|
+| `1` Luchar | elegís un ataque con `1`-`4` (muestra PP, tipo, poder y `x2` / `x½` / `x0` contra el rival). `0` o Esc vuelve |
+| `2` Pokémon | cambiás de Pokémon con `1`-`6` (el cambio gasta el turno). Si se debilita el tuyo, el cambio es obligatorio |
+| `3` Huir / `q` | te vas de la batalla |
+| `a` | piloto automático: tu equipo también lo maneja la computadora (apretá `a` de nuevo para volver a mandar vos) |
+| Enter | volver cuando termina |
+
+**Qué hay:** equipos de hasta 6, PP, prioridad de ataques, estados (parálisis, quemadura, veneno, sueño, hielo,
+confusión), subidas y bajadas de stats, curación, absorción, retroceso, golpes múltiples, amedrentar, críticos,
+STAB y efectividad de tipos. Nivel 50; el HP va duplicado para que duren más de 2 golpes (`HP_MULT` en `pokebattle.py`).
+**Qué no hay:** objetos, habilidades, clima, trampas ni dobles. Los ataques cuyo efecto no soportamos se descartan.
+
+**Animaciones:** cada ataque usa las animaciones de PMDCollab del propio Pokémon: `Attack` (físicos, con embestida),
+`Shoot` (a distancia), `Charge` (ataques de estado), `Hurt` al recibir daño, `Faint` al caer (queda tirado hasta que lo
+reemplacen) y `Sleep` mientras está dormido. Los ataques especiales lanzan un proyectil y todos hacen un destello al
+impactar, del color del tipo del ataque (la API no trae imágenes de ataques, esto se dibuja acá). Si un Pokémon no tiene
+alguna animación, se usa una embestida simple. En batalla los sprites son un poco más grandes que caminando: si tu panel
+es bajito, agrandalo con `py install.py --size 0.3`.
+
+Los datos se buscan en [PokéAPI](https://pokeapi.co) **en el momento**: stats base, ataques con sus efectos (en español)
+y la tabla de tipos. Hace falta internet la primera vez; después queda en caché (`%LOCALAPPDATA%\pokewalk\api`).
+Cada Pokémon lleva hasta 3 ataques de daño y 1 de estado, sorteados entre los que puede aprender.
+
+El rival **no usa IA**, son reglas (`Battle.ai_action` en `pokebattle.py`): casi siempre elige el ataque de mayor daño
+esperado; a veces uno al azar; usa ataques de estado si le sirven (curarse con poca vida, subir stats, dormirte si no
+tenés estado); y cambia de Pokémon si el suyo casi no te hace daño y le pegás fuerte, o cuando se debilita.
 
 ## Uso directo (cualquier terminal)
 
