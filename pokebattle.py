@@ -4,7 +4,7 @@ pokebattle - motor de batallas de pokewalk (sin IA, sin terminal).
 Batallas por equipos (hasta 6 contra 6) con lo esencial de los juegos, sin objetos:
 Luchar / cambiar de Pokémon, PP, prioridad, estados (parálisis, quemadura, veneno, sueño, hielo,
 confusión), subidas y bajadas de estadísticas, curación, absorción, retroceso, golpes múltiples,
-retroceso por amedrentar, críticos, STAB y efectividad de tipos. Nivel 50.
+retroceso por amedrentar, críticos, STAB y efectividad de tipos. Cada Pokémon tiene su nivel (50 por defecto).
 No hay habilidades, clima, trampas ni objetos.
 
 Los datos se buscan en PokeAPI en el momento de armar la pelea y quedan en el caché de disco:
@@ -100,6 +100,7 @@ class Fighter:
     moves: List[Move]
     max_hp: int = 0
     hp: int = 0
+    level: int = LEVEL
     pp: List[int] = field(default_factory=list)
     status: Optional[str] = None
     sleep: int = 0
@@ -161,9 +162,9 @@ def load_move(fetch, name):
         flinch=meta.get("flinch_chance") or 0, crit=meta.get("crit_rate") or 0)
 
 
-def candidate_moves(moves_json):
-    """Nombres de ataques a probar: los que aprende por nivel hasta el 50 (los más nuevos primero)
-    más algunos de otros métodos (MT, huevo...)."""
+def candidate_moves(moves_json, level=LEVEL):
+    """Nombres de ataques a probar: los que aprende por nivel hasta `level` (los más nuevos primero)
+    más algunos de otros métodos (MT, huevo...), menos cuanto más bajo el nivel."""
     by_level, other = {}, []
     for m in moves_json:
         name = m["move"]["name"]
@@ -171,14 +172,15 @@ def candidate_moves(moves_json):
             continue
         best = None
         for d in m["version_group_details"]:
-            if d["move_learn_method"]["name"] == "level-up" and d["level_learned_at"] <= LEVEL:
+            if d["move_learn_method"]["name"] == "level-up" and d["level_learned_at"] <= level:
                 best = d["level_learned_at"] if best is None else max(best, d["level_learned_at"])
         if best is None:
             other.append(name)
         else:
             by_level[name] = best
     top = sorted(by_level, key=by_level.get, reverse=True)[:12]
-    return top + random.sample(other, min(14, len(other)))
+    extra = 14 if level >= 40 else 8 if level >= 25 else 3      # a nivel bajo casi no tiene MT
+    return top + random.sample(other, min(extra, len(other)))
 
 
 def choose_moves(moves, types, n=4):
@@ -202,21 +204,22 @@ def choose_moves(moves, types, n=4):
     return picked
 
 
-def calc_stats(base):
-    """Stats a nivel 50 con IV 31 y EV 84 (como un equipo competitivo promedio)."""
-    out = {"hp": ((2 * base["hp"] + 31 + 21) * LEVEL // 100 + LEVEL + 10) * HP_MULT}
+def calc_stats(base, level=LEVEL):
+    """Stats con IV 31 y EV 84 (como un equipo competitivo promedio). El HP va multiplicado por
+    HP_MULT: con el HP de los juegos casi todo termina en 2 golpes."""
+    out = {"hp": ((2 * base["hp"] + 31 + 21) * level // 100 + level + 10) * HP_MULT}
     for k in ("atk", "def", "spa", "spd", "spe"):
-        out[k] = (2 * base[k] + 31 + 21) * LEVEL // 100 + 5
+        out[k] = (2 * base[k] + 31 + 21) * level // 100 + 5
     return out
 
 
-def load_fighter(fetch, dex, key):
+def load_fighter(fetch, dex, key, level=LEVEL):
     p = get_json(fetch, f"{API}/pokemon/{dex}", f"api/pokemon-{dex}.json")
     base = {STAT_KEYS[s["stat"]["name"]]: s["base_stat"] for s in p["stats"]}
     types = [t["type"]["name"] for t in p["types"]]
     with ThreadPoolExecutor(8) as ex:
-        found = [m for m in ex.map(lambda n: load_move(fetch, n), candidate_moves(p["moves"])) if m]
-    return Fighter(pretty(key), dex, types, calc_stats(base), choose_moves(found, types))
+        found = [m for m in ex.map(lambda n: load_move(fetch, n), candidate_moves(p["moves"], level)) if m]
+    return Fighter(pretty(key), dex, types, calc_stats(base, level), choose_moves(found, types), level=level)
 
 
 def describe(fetch, dex, key):
@@ -314,7 +317,7 @@ class Battle:
         if not mv.power:
             return 0.0
         ak, dk = ("spa", "spd") if mv.special else ("atk", "def")
-        base = ((2 * LEVEL // 5 + 2) * mv.power * att.stats[ak] / dfn.stats[dk]) / 50 + 2
+        base = ((2 * att.level // 5 + 2) * mv.power * att.stats[ak] / dfn.stats[dk]) / 50 + 2
         stab = 1.5 if mv.type in att.types else 1.0
         eff = self.chart.mult(mv.type, dfn.types)
         return base * stab * eff * (mv.acc or 100) / 100 * 0.925 / max(1, dfn.max_hp)
@@ -474,7 +477,7 @@ class Battle:
             a_st, d_st = max(0, a_st), min(0, d_st)
         a = att.stats[ak] * stage_mult(a_st)
         d = dfn.stats[dk] * stage_mult(d_st)
-        base = ((2 * LEVEL // 5 + 2) * mv.power * a / d) / 50 + 2
+        base = ((2 * att.level // 5 + 2) * mv.power * a / d) / 50 + 2
         if att.status == "burn" and not mv.special:
             base *= 0.5
         stab = 1.5 if mv.type in att.types else 1.0

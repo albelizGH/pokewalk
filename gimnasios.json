@@ -1,0 +1,775 @@
+{
+ "_info": "Equipos originales de los juegos, extraídos de Bulbapedia (Kanto: Rojo/Azul; Johto: Oro/Plata/Cristal). Solo se usan especie y nivel: los ataques se sortean al armar la batalla.",
+ "regiones": [
+  {
+   "id": "kanto",
+   "nombre": "Kanto",
+   "grupos": [
+    {
+     "nombre": "Gimnasios",
+     "entrenadores": [
+      {
+       "nombre": "Brock",
+       "detalle": "Líder · tipo Roca",
+       "equipo": [
+        {
+         "dex": 74,
+         "nombre": "Geodude",
+         "nivel": 12
+        },
+        {
+         "dex": 95,
+         "nombre": "Onix",
+         "nivel": 14
+        }
+       ]
+      },
+      {
+       "nombre": "Misty",
+       "detalle": "Líder · tipo Agua",
+       "equipo": [
+        {
+         "dex": 120,
+         "nombre": "Staryu",
+         "nivel": 18
+        },
+        {
+         "dex": 121,
+         "nombre": "Starmie",
+         "nivel": 21
+        }
+       ]
+      },
+      {
+       "nombre": "Lt. Surge",
+       "detalle": "Líder · tipo Eléctrico",
+       "equipo": [
+        {
+         "dex": 100,
+         "nombre": "Voltorb",
+         "nivel": 21
+        },
+        {
+         "dex": 25,
+         "nombre": "Pikachu",
+         "nivel": 18
+        },
+        {
+         "dex": 26,
+         "nombre": "Raichu",
+         "nivel": 24
+        }
+       ]
+      },
+      {
+       "nombre": "Erika",
+       "detalle": "Líder · tipo Planta",
+       "equipo": [
+        {
+         "dex": 71,
+         "nombre": "Victreebel",
+         "nivel": 29
+        },
+        {
+         "dex": 114,
+         "nombre": "Tangela",
+         "nivel": 24
+        },
+        {
+         "dex": 45,
+         "nombre": "Vileplume",
+         "nivel": 29
+        }
+       ]
+      },
+      {
+       "nombre": "Koga",
+       "detalle": "Líder · tipo Veneno",
+       "equipo": [
+        {
+         "dex": 109,
+         "nombre": "Koffing",
+         "nivel": 37
+        },
+        {
+         "dex": 89,
+         "nombre": "Muk",
+         "nivel": 39
+        },
+        {
+         "dex": 109,
+         "nombre": "Koffing",
+         "nivel": 37
+        },
+        {
+         "dex": 110,
+         "nombre": "Weezing",
+         "nivel": 43
+        }
+       ]
+      },
+      {
+       "nombre": "Sabrina",
+       "detalle": "Líder · tipo Psíquico",
+       "equipo": [
+        {
+         "dex": 64,
+         "nombre": "Kadabra",
+         "nivel": 38
+        },
+        {
+         "dex": 122,
+         "nombre": "Mr. Mime",
+         "nivel": 37
+        },
+        {
+         "dex": 49,
+         "nombre": "Venomoth",
+         "nivel": 38
+        },
+        {
+         "dex": 65,
+         "nombre": "Alakazam",
+         "nivel": 43
+        }
+       ]
+      },
+      {
+       "nombre": "Blaine",
+       "detalle": "Líder · tipo Fuego",
+       "equipo": [
+        {
+         "dex": 58,
+         "nombre": "Growlithe",
+         "nivel": 42
+        },
+        {
+         "dex": 77,
+         "nombre": "Ponyta",
+         "nivel": 40
+        },
+        {
+         "dex": 78,
+         "nombre": "Rapidash",
+         "nivel": 42
+        },
+        {
+         "dex": 59,
+         "nombre": "Arcanine",
+         "nivel": 47
+        }
+       ]
+      },
+      {
+       "nombre": "Giovanni",
+       "detalle": "Líder · tipo Tierra",
+       "equipo": [
+        {
+         "dex": 111,
+         "nombre": "Rhyhorn",
+         "nivel": 45
+        },
+        {
+         "dex": 51,
+         "nombre": "Dugtrio",
+         "nivel": 42
+        },
+        {
+         "dex": 31,
+         "nombre": "Nidoqueen",
+         "nivel": 44
+        },
+        {
+         "dex": 34,
+         "nombre": "Nidoking",
+         "nivel": 45
+        },
+        {
+         "dex": 112,
+         "nombre": "Rhydon",
+         "nivel": 50
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "nombre": "Alto Mando y campeón",
+     "entrenadores": [
+      {
+       "nombre": "Lorelei",
+       "detalle": "Alto Mando · Hielo y Agua",
+       "equipo": [
+        {
+         "dex": 87,
+         "nombre": "Dewgong",
+         "nivel": 54
+        },
+        {
+         "dex": 91,
+         "nombre": "Cloyster",
+         "nivel": 53
+        },
+        {
+         "dex": 80,
+         "nombre": "Slowbro",
+         "nivel": 54
+        },
+        {
+         "dex": 124,
+         "nombre": "Jynx",
+         "nivel": 56
+        },
+        {
+         "dex": 131,
+         "nombre": "Lapras",
+         "nivel": 56
+        }
+       ]
+      },
+      {
+       "nombre": "Bruno",
+       "detalle": "Alto Mando · Lucha",
+       "equipo": [
+        {
+         "dex": 95,
+         "nombre": "Onix",
+         "nivel": 53
+        },
+        {
+         "dex": 107,
+         "nombre": "Hitmonchan",
+         "nivel": 55
+        },
+        {
+         "dex": 106,
+         "nombre": "Hitmonlee",
+         "nivel": 55
+        },
+        {
+         "dex": 95,
+         "nombre": "Onix",
+         "nivel": 56
+        },
+        {
+         "dex": 68,
+         "nombre": "Machamp",
+         "nivel": 58
+        }
+       ]
+      },
+      {
+       "nombre": "Agatha",
+       "detalle": "Alto Mando · Fantasma",
+       "equipo": [
+        {
+         "dex": 94,
+         "nombre": "Gengar",
+         "nivel": 56
+        },
+        {
+         "dex": 42,
+         "nombre": "Golbat",
+         "nivel": 56
+        },
+        {
+         "dex": 93,
+         "nombre": "Haunter",
+         "nivel": 55
+        },
+        {
+         "dex": 24,
+         "nombre": "Arbok",
+         "nivel": 58
+        },
+        {
+         "dex": 94,
+         "nombre": "Gengar",
+         "nivel": 60
+        }
+       ]
+      },
+      {
+       "nombre": "Lance",
+       "detalle": "Alto Mando · Dragón",
+       "equipo": [
+        {
+         "dex": 130,
+         "nombre": "Gyarados",
+         "nivel": 58
+        },
+        {
+         "dex": 148,
+         "nombre": "Dragonair",
+         "nivel": 56
+        },
+        {
+         "dex": 148,
+         "nombre": "Dragonair",
+         "nivel": 56
+        },
+        {
+         "dex": 142,
+         "nombre": "Aerodactyl",
+         "nivel": 60
+        },
+        {
+         "dex": 149,
+         "nombre": "Dragonite",
+         "nivel": 62
+        }
+       ]
+      },
+      {
+       "nombre": "Blue (Charizard)",
+       "detalle": "Campeón",
+       "equipo": [
+        {
+         "dex": 18,
+         "nombre": "Pidgeot",
+         "nivel": 61
+        },
+        {
+         "dex": 65,
+         "nombre": "Alakazam",
+         "nivel": 59
+        },
+        {
+         "dex": 112,
+         "nombre": "Rhydon",
+         "nivel": 61
+        },
+        {
+         "dex": 103,
+         "nombre": "Exeggutor",
+         "nivel": 61
+        },
+        {
+         "dex": 130,
+         "nombre": "Gyarados",
+         "nivel": 63
+        },
+        {
+         "dex": 6,
+         "nombre": "Charizard",
+         "nivel": 65
+        }
+       ]
+      },
+      {
+       "nombre": "Blue (Blastoise)",
+       "detalle": "Campeón",
+       "equipo": [
+        {
+         "dex": 18,
+         "nombre": "Pidgeot",
+         "nivel": 61
+        },
+        {
+         "dex": 65,
+         "nombre": "Alakazam",
+         "nivel": 59
+        },
+        {
+         "dex": 112,
+         "nombre": "Rhydon",
+         "nivel": 61
+        },
+        {
+         "dex": 59,
+         "nombre": "Arcanine",
+         "nivel": 61
+        },
+        {
+         "dex": 103,
+         "nombre": "Exeggutor",
+         "nivel": 63
+        },
+        {
+         "dex": 9,
+         "nombre": "Blastoise",
+         "nivel": 65
+        }
+       ]
+      },
+      {
+       "nombre": "Blue (Venusaur)",
+       "detalle": "Campeón",
+       "equipo": [
+        {
+         "dex": 18,
+         "nombre": "Pidgeot",
+         "nivel": 61
+        },
+        {
+         "dex": 65,
+         "nombre": "Alakazam",
+         "nivel": 59
+        },
+        {
+         "dex": 112,
+         "nombre": "Rhydon",
+         "nivel": 61
+        },
+        {
+         "dex": 130,
+         "nombre": "Gyarados",
+         "nivel": 61
+        },
+        {
+         "dex": 59,
+         "nombre": "Arcanine",
+         "nivel": 63
+        },
+        {
+         "dex": 3,
+         "nombre": "Venusaur",
+         "nivel": 65
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "johto",
+   "nombre": "Johto",
+   "grupos": [
+    {
+     "nombre": "Gimnasios",
+     "entrenadores": [
+      {
+       "nombre": "Falkner",
+       "detalle": "Líder · tipo Volador",
+       "equipo": [
+        {
+         "dex": 16,
+         "nombre": "Pidgey",
+         "nivel": 7
+        },
+        {
+         "dex": 17,
+         "nombre": "Pidgeotto",
+         "nivel": 9
+        }
+       ]
+      },
+      {
+       "nombre": "Bugsy",
+       "detalle": "Líder · tipo Bicho",
+       "equipo": [
+        {
+         "dex": 11,
+         "nombre": "Metapod",
+         "nivel": 14
+        },
+        {
+         "dex": 14,
+         "nombre": "Kakuna",
+         "nivel": 14
+        },
+        {
+         "dex": 123,
+         "nombre": "Scyther",
+         "nivel": 16
+        }
+       ]
+      },
+      {
+       "nombre": "Whitney",
+       "detalle": "Líder · tipo Normal",
+       "equipo": [
+        {
+         "dex": 35,
+         "nombre": "Clefairy",
+         "nivel": 18
+        },
+        {
+         "dex": 241,
+         "nombre": "Miltank",
+         "nivel": 20
+        }
+       ]
+      },
+      {
+       "nombre": "Morty",
+       "detalle": "Líder · tipo Fantasma",
+       "equipo": [
+        {
+         "dex": 92,
+         "nombre": "Gastly",
+         "nivel": 21
+        },
+        {
+         "dex": 93,
+         "nombre": "Haunter",
+         "nivel": 21
+        },
+        {
+         "dex": 94,
+         "nombre": "Gengar",
+         "nivel": 25
+        },
+        {
+         "dex": 93,
+         "nombre": "Haunter",
+         "nivel": 23
+        }
+       ]
+      },
+      {
+       "nombre": "Chuck",
+       "detalle": "Líder · tipo Lucha",
+       "equipo": [
+        {
+         "dex": 57,
+         "nombre": "Primeape",
+         "nivel": 27
+        },
+        {
+         "dex": 62,
+         "nombre": "Poliwrath",
+         "nivel": 30
+        }
+       ]
+      },
+      {
+       "nombre": "Jasmine",
+       "detalle": "Líder · tipo Acero",
+       "equipo": [
+        {
+         "dex": 81,
+         "nombre": "Magnemite",
+         "nivel": 30
+        },
+        {
+         "dex": 81,
+         "nombre": "Magnemite",
+         "nivel": 30
+        },
+        {
+         "dex": 208,
+         "nombre": "Steelix",
+         "nivel": 35
+        }
+       ]
+      },
+      {
+       "nombre": "Pryce",
+       "detalle": "Líder · tipo Hielo",
+       "equipo": [
+        {
+         "dex": 86,
+         "nombre": "Seel",
+         "nivel": 27
+        },
+        {
+         "dex": 87,
+         "nombre": "Dewgong",
+         "nivel": 29
+        },
+        {
+         "dex": 221,
+         "nombre": "Piloswine",
+         "nivel": 31
+        }
+       ]
+      },
+      {
+       "nombre": "Clair",
+       "detalle": "Líder · tipo Dragón",
+       "equipo": [
+        {
+         "dex": 148,
+         "nombre": "Dragonair",
+         "nivel": 37
+        },
+        {
+         "dex": 148,
+         "nombre": "Dragonair",
+         "nivel": 37
+        },
+        {
+         "dex": 148,
+         "nombre": "Dragonair",
+         "nivel": 37
+        },
+        {
+         "dex": 230,
+         "nombre": "Kingdra",
+         "nivel": 40
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "nombre": "Alto Mando y campeón",
+     "entrenadores": [
+      {
+       "nombre": "Will",
+       "detalle": "Alto Mando · Psíquico",
+       "equipo": [
+        {
+         "dex": 178,
+         "nombre": "Xatu",
+         "nivel": 40
+        },
+        {
+         "dex": 103,
+         "nombre": "Exeggutor",
+         "nivel": 41
+        },
+        {
+         "dex": 80,
+         "nombre": "Slowbro",
+         "nivel": 41
+        },
+        {
+         "dex": 124,
+         "nombre": "Jynx",
+         "nivel": 41
+        },
+        {
+         "dex": 178,
+         "nombre": "Xatu",
+         "nivel": 42
+        }
+       ]
+      },
+      {
+       "nombre": "Koga",
+       "detalle": "Alto Mando · Veneno",
+       "equipo": [
+        {
+         "dex": 168,
+         "nombre": "Ariados",
+         "nivel": 40
+        },
+        {
+         "dex": 49,
+         "nombre": "Venomoth",
+         "nivel": 41
+        },
+        {
+         "dex": 205,
+         "nombre": "Forretress",
+         "nivel": 43
+        },
+        {
+         "dex": 89,
+         "nombre": "Muk",
+         "nivel": 42
+        },
+        {
+         "dex": 169,
+         "nombre": "Crobat",
+         "nivel": 44
+        }
+       ]
+      },
+      {
+       "nombre": "Bruno",
+       "detalle": "Alto Mando · Lucha",
+       "equipo": [
+        {
+         "dex": 237,
+         "nombre": "Hitmontop",
+         "nivel": 42
+        },
+        {
+         "dex": 106,
+         "nombre": "Hitmonlee",
+         "nivel": 42
+        },
+        {
+         "dex": 107,
+         "nombre": "Hitmonchan",
+         "nivel": 42
+        },
+        {
+         "dex": 95,
+         "nombre": "Onix",
+         "nivel": 43
+        },
+        {
+         "dex": 68,
+         "nombre": "Machamp",
+         "nivel": 46
+        }
+       ]
+      },
+      {
+       "nombre": "Karen",
+       "detalle": "Alto Mando · Siniestro",
+       "equipo": [
+        {
+         "dex": 197,
+         "nombre": "Umbreon",
+         "nivel": 42
+        },
+        {
+         "dex": 45,
+         "nombre": "Vileplume",
+         "nivel": 42
+        },
+        {
+         "dex": 94,
+         "nombre": "Gengar",
+         "nivel": 45
+        },
+        {
+         "dex": 198,
+         "nombre": "Murkrow",
+         "nivel": 44
+        },
+        {
+         "dex": 229,
+         "nombre": "Houndoom",
+         "nivel": 47
+        }
+       ]
+      },
+      {
+       "nombre": "Lance",
+       "detalle": "Campeón · Dragón",
+       "equipo": [
+        {
+         "dex": 130,
+         "nombre": "Gyarados",
+         "nivel": 44
+        },
+        {
+         "dex": 149,
+         "nombre": "Dragonite",
+         "nivel": 47
+        },
+        {
+         "dex": 6,
+         "nombre": "Charizard",
+         "nivel": 46
+        },
+        {
+         "dex": 142,
+         "nombre": "Aerodactyl",
+         "nivel": 46
+        },
+        {
+         "dex": 149,
+         "nombre": "Dragonite",
+         "nivel": 47
+        },
+        {
+         "dex": 149,
+         "nombre": "Dragonite",
+         "nivel": 50
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -65,6 +65,7 @@ El hook envuelve `prompt` sin alterar `$?` ni `$LASTEXITCODE`, así que convive 
 | Tecla | Qué hace |
 |---|---|
 | `b` | **batalla** por equipos (abajo): `pika char` = 1 contra 1, `pika char vs mew snor` = equipos de hasta 6, Enter solo = 3 contra 3 al azar |
+| `g` | **combates de gimnasio** (abajo): líderes, Alto Mando y campeón de Kanto y Johto |
 | `i` | **info**: tipo, stats base, altura y peso de un Pokémon (Enter solo = uno que camina) |
 | `h` | **mimar**: escribís a quién (nombre, número o el principio: `pika`; varios con espacio) y se alegra y te dice algo. Enter solo = uno al azar |
 
@@ -100,6 +101,20 @@ El rival **no usa IA**, son reglas (`Battle.ai_action` en `pokebattle.py`): casi
 esperado; a veces uno al azar; usa ataques de estado si le sirven (curarse con poca vida, subir stats, dormirte si no
 tenés estado); y cambia de Pokémon si el suyo casi no te hace daño y le pegás fuerte, o cuando se debilita.
 
+### Combates de gimnasio (`g`)
+
+Menú con números: región (Kanto / Johto) → Gimnasios o Alto Mando y campeón → entrenador → vista previa de su equipo → Enter
+para pelear (`0` vuelve, Esc cierra). Son 28 entrenadores: los 8 líderes de cada región, el Alto Mando y el campeón
+(Blue en sus tres versiones, y Lance en Johto).
+
+- **Tu equipo** son los Pokémon que caminan (hasta 6; si no hay, 3 al azar). Cambialos antes con `c` o `a`/`x`.
+- **El rival** usa sus Pokémon y **niveles originales** de los juegos (Kanto: Rojo/Azul; Johto: Oro/Plata/Cristal).
+- **Tus niveles** salen al azar: nivel medio del rival ±20 (entre 1 y 100) para cada uno. Algunos combates salen
+  fáciles y otros duros. El nivel se ve en las barras (`Pikachu Nv32`) y la batalla lo tiene en cuenta (stats, HP, daño
+  y ataques que puede aprender).
+- Los ataques de todos se sortean de los que el Pokémon puede aprender a ese nivel, no son los de los juegos.
+- Los equipos están en `gimnasios.json` (se pueden editar o agregar entrenadores con el mismo formato).
+
 ## Uso directo (cualquier terminal)
 
 ```bash
@@ -125,6 +140,8 @@ de PowerShell (`$PROFILE`). El caché de sprites está en `%LOCALAPPDATA%\pokewa
 
 - Sprites: [PMDCollab/SpriteCollab](https://github.com/PMDCollab/SpriteCollab) (se descargan al usarlo, no están en este repo).
 - Nombres y números: [PokéAPI](https://github.com/PokeAPI/pokeapi).
+- Equipos de los líderes, Alto Mando y campeones (`gimnasios.json`): [Bulbapedia](https://bulbapedia.bulbagarden.net)
+  (CC BY-NC-SA 2.5).
 - Inspirado en [vscode-pokemon](https://github.com/jakobhoeg/vscode-pokemon).
 
 Proyecto de fans sin fines de lucro. Pokémon y sus personajes son marcas de Nintendo, Creatures Inc. y GAME FREAK.

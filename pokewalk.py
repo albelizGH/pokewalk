@@ -748,28 +748,62 @@ def expand_name(term, walking):
     return next((n for n in reversed(walking) if n.startswith(t)), t)
 
 
-def prepare_battle(sides, loader, jobs, walking=()):
-    """Hilo: busca en PokeAPI stats y ataques de todos los Pokémon de ambos equipos (más la tabla de
-    tipos) y baja los sprites. Cuando está todo listo avisa a la pantalla; mientras tanto la animación sigue."""
-    def build(name):
+def build_battle(sides, loader, walking=()):
+    """sides = [[(nombre, nivel), ...] (vos), [...] (rival)] -> (Battle, sprites). Bloquea mientras busca
+    en PokeAPI stats y ataques de todos (más la tabla de tipos) y baja los sprites: va siempre en un hilo."""
+    def build(spec):
+        name, level = spec
         dex, key = resolve(expand_name(name, walking))
         if (dex, "batalla") not in loader.cache:         # versión con las animaciones de combate
             loader.cache[(dex, "batalla")] = Sprite(dex, loader.scale, battle=True)
-        return pb.load_fighter(fetch, dex, key), loader.cache[(dex, "batalla")]
+        return pb.load_fighter(fetch, dex, key, level), loader.cache[(dex, "batalla")]
+
+    with ThreadPoolExecutor(4) as ex:
+        built = list(ex.map(build, [spec for side in sides for spec in side]))
+    teams, sprites, k = [], [], 0
+    for side in sides:
+        chunk = built[k:k + len(side)]
+        k += len(side)
+        teams.append([f for f, _ in chunk])
+        sprites.append([s for _, s in chunk])
+    chart = pb.TypeChart(fetch)
+    chart.preload({m.type for team in teams for f in team for m in f.moves})
+    return pb.Battle(teams[0], teams[1], chart), sprites
+
+
+def prepare_battle(sides, loader, jobs, walking=()):
+    """Hilo: batalla común, todos a nivel 50. Avisa a la pantalla cuando está lista."""
     try:
-        with ThreadPoolExecutor(4) as ex:
-            built = list(ex.map(build, [n for side in sides for n in side]))
-        teams, sprites, k = [], [], 0
-        for side in sides:
-            chunk = built[k:k + len(side)]
-            k += len(side)
-            teams.append([f for f, _ in chunk])
-            sprites.append([s for _, s in chunk])
-        chart = pb.TypeChart(fetch)
-        chart.preload({m.type for team in teams for f in team for m in f.moves})
-        jobs.put(("battle", pb.Battle(teams[0], teams[1], chart), sprites))
+        battle, sprites = build_battle([[(n, pb.LEVEL) for n in side] for side in sides], loader, walking)
+        jobs.put(("battle", battle, sprites, None))
     except Exception as e:     # sin internet, nombre inválido, sprite faltante...
         jobs.put(("berror", f"No pude preparar la batalla: {e}", 6))
+
+
+def prepare_gym_battle(trainer, mine, loader, jobs):
+    """Hilo: tu equipo contra el de un líder / Alto Mando. Los del rival van con sus niveles originales; cada
+    uno de los tuyos sale con el nivel medio del rival más un azar entre -20 y +20 (entre 1 y 100)."""
+    try:
+        foes = trainer["equipo"]
+        avg = round(sum(p["nivel"] for p in foes) / len(foes))
+        mine_levels = [max(1, min(100, avg + random.randint(-20, 20))) for _ in mine]
+        battle, sprites = build_battle(
+            [list(zip(mine, mine_levels)), [(str(p["dex"]), p["nivel"]) for p in foes]], loader, mine)
+        intro = [f"¡{trainer['nombre']} quiere combatir!   (nivel medio del rival: {avg})",
+                 "Tu equipo: " + " · ".join(f"{f.name} Nv{f.level}" for f in battle.teams[0])]
+        jobs.put(("battle", battle, sprites, intro))
+    except Exception as e:
+        jobs.put(("gerror", f"No pude preparar el combate: {e}", 6))
+
+
+def load_gyms():
+    """gimnasios.json (junto al programa) -> lista de regiones, o [] si falta."""
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gimnasios.json")
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)["regiones"]
+    except (OSError, ValueError, KeyError):
+        return []
 
 
 def lookup_info(term, jobs, walking=()):
@@ -824,7 +858,7 @@ class BattleScene:
     Cada ataque usa las animaciones de PMD del Pokémon (Attack / Shoot / Charge, Hurt, Faint, Sleep) y,
     si tiene sentido, un proyectil y un destello del color del tipo."""
 
-    def __init__(self, battle, sprites, ppc):
+    def __init__(self, battle, sprites, ppc, intro=None):
         self.b, self.sprites, self.ppc = battle, sprites, ppc     # sprites[lado][índice en el equipo]
         self.active = [0, 0]
         self.pets = [self._mkpet(0, 0), self._mkpet(1, 0)]
@@ -839,9 +873,9 @@ class BattleScene:
         self.fx, self.hit_t, self.dur_eff, self.lunge = [], 0.0, 0.0, False
         self._apply(battle.snap())
         a, b = battle.teams
-        intro = f"¡{a[0].name} vs {b[0].name}!" if len(a) == len(b) == 1 else \
-            f"¡Batalla de equipos! {len(a)} contra {len(b)}"
-        self._start([pb.Step(intro, dur=1.8)])
+        intro = intro or [f"¡{a[0].name} vs {b[0].name}!" if len(a) == len(b) == 1 else
+                          f"¡Batalla de equipos! {len(a)} contra {len(b)}"]
+        self._start([pb.Step(text, dur=2.2 if len(intro) > 1 else 1.8) for text in intro])
 
     def _mkpet(self, s, i):
         p = Pet(self.b.teams[s][i].name, self.sprites[s][i], 1)
@@ -1080,10 +1114,10 @@ class BattleScene:
         tag = (" " + pb.STATUS_TAG[st] if st else "") + (" CNF" if conf else "")
         right = f"] {hp}/{f.max_hp}"
         dots = [h > 0 for h in self.team_hp[s]]
-        plain = f"{f.name}{tag} [" + "█" * fill + "░" * (bw - fill) + right + \
+        plain = f"{f.name} Nv{f.level}{tag} [" + "█" * fill + "░" * (bw - fill) + right + \
             (" " + "●" * len(dots) if len(dots) > 1 else "")
-        ansi = (f"\x1b[97m{f.name}\x1b[33m{tag}\x1b[0m [\x1b[{color}m" + "█" * fill + "\x1b[90m" + "░" * (bw - fill)
-                + "\x1b[0m" + right)
+        ansi = (f"\x1b[97m{f.name}\x1b[0m Nv{f.level}\x1b[33m{tag}\x1b[0m [\x1b[{color}m" + "█" * fill
+                + "\x1b[90m" + "░" * (bw - fill) + "\x1b[0m" + right)
         if len(dots) > 1:
             ansi += " " + "".join("\x1b[32m●" if d else "\x1b[90m○" for d in dots) + "\x1b[0m"
         return plain, ansi
@@ -1106,7 +1140,7 @@ class BattleScene:
         parts = []
         for i, f in enumerate(b.teams[0]):
             state = " K.O." if f.hp <= 0 else " (en combate)" if i == b.active[0] else ""
-            parts.append(f"{i + 1} {f.name} {f.hp}/{f.max_hp}{state}")
+            parts.append(f"{i + 1} {f.name} Nv{f.level} {f.hp}/{f.max_hp}{state}")
         return ("¡Elegí al próximo!  " if self.forced else "") + "  ".join(parts) + ("" if self.forced else "   0 volver")
 
     def hud(self, cols):
@@ -1171,6 +1205,8 @@ def main():
     jobs = queue.Queue()   # resultados de hilos: ("battle", Battle, sprites) | ("flash"|"error", texto, seg)
     scene = None           # BattleScene mientras hay una pelea
     battling = False       # preparando una pelea (buscando datos en internet)
+    gyms = load_gyms()     # regiones -> grupos -> entrenadores (gimnasios.json)
+    gym = None             # menú de combates (tecla g): {"stage": 0..3, "r": región, "g": grupo, "t": entrenador}
     w = sys.stdout.write
     w("\x1b[?1049h\x1b[?25l\x1b[2J")
 
@@ -1255,6 +1291,56 @@ def main():
         flash(f"Buscando en internet {', '.join(mine)} vs {', '.join(rival)}... (la primera vez tarda)", 90)
         threading.Thread(target=prepare_battle, args=([mine, rival], loader, jobs, walking), daemon=True).start()
 
+    def start_gym(trainer):
+        """Tu equipo (los que caminan, hasta 6; si no hay, 3 al azar) contra un líder / Alto Mando."""
+        nonlocal battling
+        if battling:
+            return
+        mine = [p.name for p in pets][:6] or [str(random.randint(1, 493)) for _ in range(3)]
+        battling = True
+        flash(f"Buscando en internet el combate contra {trainer['nombre']}... (la primera vez tarda)", 90)
+        threading.Thread(target=prepare_gym_battle, args=(trainer, mine, loader, jobs), daemon=True).start()
+
+    def gym_trainers():
+        return gyms[gym["r"]]["grupos"][gym["g"]]["entrenadores"]
+
+    def gym_text():
+        if not gyms:
+            return "No encontré gimnasios.json (tiene que estar junto a pokewalk.py).   Esc cierra"
+        st = gym["stage"]
+        if st == 0:
+            return "Combates:  " + "   ".join(f"{i + 1} {r['nombre']}" for i, r in enumerate(gyms)) + "      Esc cancela"
+        region = gyms[gym["r"]]
+        if st == 1:
+            return f"{region['nombre']}:  " + "   ".join(
+                f"{i + 1} {g['nombre']}" for i, g in enumerate(region["grupos"])) + "      0 volver"
+        if st == 2:
+            return f"{region['nombre']} · {region['grupos'][gym['g']]['nombre']}:  " + "   ".join(
+                f"{i + 1} {t['nombre']}" for i, t in enumerate(gym_trainers())) + "      0 volver"
+        t = gym["t"]
+        team = " · ".join(f"{p['nombre']} Nv{p['nivel']}" for p in t["equipo"])
+        return f"{t['nombre']} ({t['detalle']}): {team}      Enter: pelear   0 volver"
+
+    def gym_key(ch):
+        """Menú de combates con dígitos: región -> grupo -> entrenador -> Enter. 0 vuelve, Esc cierra."""
+        nonlocal gym
+        if ch == "\x1b" or not gyms:
+            gym = None
+        elif ch == "0" or ch in ("\x08", "\x7f"):
+            gym = None if gym["stage"] == 0 else {**gym, "stage": gym["stage"] - 1}
+        elif gym["stage"] == 3:
+            if ch in ("\r", "\n"):
+                trainer, gym = gym["t"], None
+                start_gym(trainer)
+        elif ch.isdigit():
+            i, st = int(ch) - 1, gym["stage"]
+            if st == 0 and i < len(gyms):
+                gym = {"stage": 1, "r": i}
+            elif st == 1 and i < len(gyms[gym["r"]]["grupos"]):
+                gym = {**gym, "stage": 2, "g": i}
+            elif st == 2 and i < len(gym_trainers()):
+                gym = {**gym, "stage": 3, "t": gym_trainers()[i]}
+
     def start_info(parts):
         term = parts[0] if parts else (random.choice(pets).name if pets else str(random.randint(1, 493)))
         flash(f"Buscando a {term}...", 30)
@@ -1294,10 +1380,11 @@ def main():
             while not jobs.empty():
                 job = jobs.get()
                 if job[0] == "battle":
-                    battling, scene, redraw = False, BattleScene(job[1], job[2], px_per_col), True
+                    battling, redraw = False, True
+                    scene = BattleScene(job[1], job[2], px_per_col, job[3])
                     flash("", 0)
                 else:                                           # "flash" | "error" | "berror" | "ierror"
-                    battling = battling and job[0] != "berror"
+                    battling = battling and job[0] not in ("berror", "gerror")
                     flash(job[1], job[2])
                     again = {"berror": "battle", "ierror": "info"}.get(job[0])
                     if again and mode is None and not scene:    # falló un nombre: reabrir con lo escrito, para corregir
@@ -1339,6 +1426,9 @@ def main():
                     if how:
                         end_scene(how)
                         redraw = True
+                    continue
+                if gym:
+                    gym_key(ch)
                     continue
                 if mode:
                     cur = min(cur, len(buf))
@@ -1406,6 +1496,8 @@ def main():
                         mode, buf = "battle", ""
                     elif c == "i":
                         mode, buf = "info", ""
+                    elif c == "g":
+                        gym = {"stage": 0}
                     elif c == "h" and pets:
                         mode, buf = "pet", ""
 
@@ -1434,14 +1526,16 @@ def main():
                 p.update(dt, cols * px_per_col, idle, sleep_after)
 
             # --- línea de estado
-            if mode:
+            if gym:
+                status = status_line(gym_text(), cols, True)
+            elif mode:
                 label = f"{prompt_err}  →  corregí y Enter (Esc cancela)" if prompt_err else PROMPTS[mode]
                 status = prompt_line(label, buf, cur, cols)
             elif time.time() < msg_until:
                 status = status_line(msg, cols, True)
             else:
                 lista = ", ".join(p.name for p in pets) or "(vacío)"
-                status = status_line(f"{lista}   ·  a agregar  c cambiar  x sacar  r azar  b batalla  i info  h mimar  q salir", cols)
+                status = status_line(f"{lista}   ·  a agregar  c cambiar  x sacar  r azar  b batalla  g gimnasios  i info  h mimar  q salir", cols)
 
             frame = render_sixel(pets, cols, rows, bg) if args.sixel else render(pets, cols, rows)
             bub = bubbles(pets, cols, rows, args.sixel, px_per_col)
