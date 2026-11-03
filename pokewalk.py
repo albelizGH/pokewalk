@@ -1629,7 +1629,6 @@ def main():
                     threading.Thread(target=prepare_versus, args=(vs, loader, jobs), daemon=True).start()
                 elif ev and ev[0] == "error":
                     close_vs(ev[1], 6)
-
             # --- teclado
             typed = keys.read()
             if typed:
@@ -1784,7 +1783,8 @@ def main():
                 status = status_line(msg, cols, True)
             else:
                 lista = ", ".join(p.name for p in pets) or "(vacío)"
-                status = status_line(f"{lista}   ·  a agregar  c cambiar  x sacar  r azar  b batalla  v versus  g gimnasios  i info  h mimar  q salir", cols)
+                keys_hint = "v VERSUS  b batalla  g gimnasios  a agregar  c cambiar  x sacar  r azar  i info  h mimar  q salir"
+                status = status_line(f"{keys_hint}   ·  {lista}", cols)
 
             frame = render_sixel(pets, cols, rows, bg) if args.sixel else render(pets, cols, rows)
             bub = bubbles(pets, cols, rows, args.sixel, px_per_col)

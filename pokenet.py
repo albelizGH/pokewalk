@@ -14,10 +14,14 @@ Cómo funciona:
 Protocolo: una línea de JSON por mensaje, sobre TCP. Nada de esto es seguro contra un rival tramposo
 (los equipos los arma cada uno): está pensado para jugar con amigos, no para torneos.
 """
+import base64
+import hashlib
 import json
 import os
 import queue
 import socket
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import asdict
@@ -59,6 +63,96 @@ def _side(v):
     if v not in (0, 1):
         raise ValueError("lado inválido")
     return int(v)
+
+
+# --------------------------------------------------------------------------- firewall de Windows
+# Windows Defender Firewall descarta todo lo que entra a un programa que no tenga permiso, y sin avisar:
+# el que conecta ve un timeout. Windows suele preguntar "¿permitir a Python?" la primera vez que se abre un
+# puerto, pero si ese aviso se cancela, no aparece (red pública, políticas de la empresa) o se cerró solo, queda
+# una regla que BLOQUEA a python.exe y la sala no anda. Por eso, al entrar a Versus, pokewalk revisa y, si hace
+# falta, pide permiso de administrador (el aviso normal de Windows, una sola vez) y deja una regla que permite
+# a este Python y borra las que lo bloqueaban. Solo toca reglas de ESTE python.exe.
+_fw_ok = False          # ya revisado en esta sesión
+
+
+def _image_path():
+    """Ruta real del .exe de este proceso (la que ve el firewall; con Python de la Store difiere de sys.executable)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k = ctypes.windll.kernel32
+        k.GetCurrentProcess.restype = wintypes.HANDLE
+        k.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                 ctypes.POINTER(wintypes.DWORD)]
+        buf, n = ctypes.create_unicode_buffer(1024), wintypes.DWORD(1024)
+        if k.QueryFullProcessImageNameW(k.GetCurrentProcess(), 0, buf, ctypes.byref(n)):
+            return buf.value
+    except Exception:
+        pass
+    return sys.executable
+
+
+def _fw_ids():
+    exe = _image_path()
+    return exe, "pokewalk (" + hashlib.sha1(exe.lower().encode("utf-8")).hexdigest()[:8] + ")"
+
+
+def _ps_str(s):
+    return "'" + s.replace("'", "''") + "'"
+
+
+_FW_FIND_BLOCKS = ("Get-NetFirewallRule -Direction Inbound -Action Block -Enabled True -ErrorAction SilentlyContinue"
+                   " | Where-Object { ($_ | Get-NetFirewallApplicationFilter).Program -eq $exe }")
+
+
+def _fw_check_script(exe, name):
+    return (f"$exe={_ps_str(exe)}; $n={_ps_str(name)}; $blk=@({_FW_FIND_BLOCKS}); "
+            "$ok=[bool](Get-NetFirewallRule -DisplayName $n -ErrorAction SilentlyContinue); "
+            "if ($ok -and $blk.Count -eq 0) { 'ok' } else { 'fix' }")
+
+
+def _fw_fix_script(exe, name):
+    return (f"$exe={_ps_str(exe)}; $n={_ps_str(name)}; {_FW_FIND_BLOCKS} | Remove-NetFirewallRule; "
+            "if (-not (Get-NetFirewallRule -DisplayName $n -ErrorAction SilentlyContinue)) { "
+            "New-NetFirewallRule -DisplayName $n -Direction Inbound -Action Allow -Program $exe -Profile Any | Out-Null }")
+
+
+def _powershell(args, timeout):
+    return subprocess.run(["powershell", "-NoProfile", "-NonInteractive"] + args, capture_output=True, text=True,
+                          timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def firewall_status():
+    """"ok" (permitido, sin bloqueos) | "fix" (falta la regla o hay una que bloquea) | "n/a" (no se pudo revisar)."""
+    exe, name = _fw_ids()
+    try:
+        out = _powershell(["-Command", _fw_check_script(exe, name)], 60).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return "n/a"
+    return out if out in ("ok", "fix") else "n/a"
+
+
+def ensure_firewall():
+    """Bloquea (llamar desde un hilo): "ok" | "added" | "declined" (no dieron el permiso) | "n/a" (no es Windows)."""
+    global _fw_ok
+    if os.name != "nt" or _fw_ok:
+        return "ok" if _fw_ok else "n/a"
+    status = firewall_status()
+    if status == "n/a":
+        return "n/a"
+    added = False
+    if status == "fix":
+        exe, name = _fw_ids()
+        enc = base64.b64encode(_fw_fix_script(exe, name).encode("utf-16-le")).decode("ascii")
+        outer = (f"Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden "
+                 f"-ArgumentList '-NoProfile','-EncodedCommand','{enc}'")     # el aviso de Windows (UAC)
+        try:
+            _powershell(["-Command", outer], 180)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        status, added = firewall_status(), True
+    _fw_ok = status == "ok"
+    return ("added" if added else "ok") if _fw_ok else "declined"
 
 
 # --------------------------------------------------------------------------- datos <-> JSON
@@ -401,14 +495,28 @@ class Versus:
         self.closed = False
         self._conn = None
         self._fail = ""
+        self._fw = None
+        self.noperm = False        # Windows no dio el permiso: puede que el amigo no pueda conectarse
         self._lock = threading.Lock()
         self._hello = False
+        if os.name == "nt" and not _fw_ok:             # antes de nada: que Windows deje pasar a pokewalk
+            self.stage = "firewall"
+            threading.Thread(target=self._firewall, daemon=True).start()
+
+    def _firewall(self):
+        res = ensure_firewall()
+        with self._lock:
+            self._fw = res
 
     # --- texto de la línea de estado
     def text(self):
         st = self.stage
+        if st == "firewall":
+            return ("Revisando los permisos de red de Windows... Si aparece un aviso de Windows, aceptalo: "
+                    "es para que tu amigo pueda conectarse (una sola vez).      Esc cancela")
         if st == "menu":
-            return "Versus en la red local:   1 Crear sala   2 Buscar salas   3 Conectar por IP      Esc cancela"
+            warn = "⚠ Sin permiso de Windows (salí y entrá de nuevo y aceptá el aviso) · " if self.noperm else ""
+            return warn + "Versus en la red local:   1 Crear sala   2 Buscar salas   3 Conectar por IP      Esc cancela"
         if st == "hosting":
             where = ", ".join(self.room.ips) if self.room and self.room.ips else "esta compu"
             return f"Sala «{self.name}» abierta ({where}) · esperando a un amigo...      Esc cierra la sala"
@@ -478,6 +586,9 @@ class Versus:
     def _connect(self, ip, port):
         try:
             res = ("ok", Link(socket.create_connection((ip, port), timeout=5)))
+        except socket.timeout:
+            res = ("err", "no contesta. Revisá que sea la IP de la sala (la del Wi-Fi) y que el otro tenga la "
+                          "última versión de pokewalk: ahí se abre solo el permiso de Windows.")
         except (OSError, ValueError) as e:
             res = ("err", str(e) or e.__class__.__name__)
         with self._lock:
@@ -506,6 +617,13 @@ class Versus:
         if self._fail:
             fail, self._fail = self._fail, ""
             return ("error", fail)
+        if self.stage == "firewall":
+            with self._lock:
+                res = self._fw
+            if not res:
+                return None
+            self.stage, self.noperm = "menu", res == "declined"
+            return None
         if self.stage == "hosting":
             link = self.room.accept()
             if link:

@@ -65,6 +65,7 @@ El hook envuelve `prompt` sin alterar `$?` ni `$LASTEXITCODE`, así que convive 
 | Tecla | Qué hace |
 |---|---|
 | `b` | **batalla** por equipos (abajo): `pika char` = 1 contra 1, `pika char vs mew snor` = equipos de hasta 6, Enter solo = 3 contra 3 al azar |
+| `v` | **versus contra un amigo** en la misma red (abajo, "Versus contra un amigo") |
 | `g` | **combates de gimnasio** (abajo): líderes, Alto Mando y campeón de Kanto y Johto |
 | `i` | **info**: tipo, stats base, altura y peso de un Pokémon (Enter solo = uno que camina) |
 | `h` | **mimar**: escribís a quién (nombre, número o el principio: `pika`; varios con espacio) y se alegra y te dice algo. Enter solo = uno al azar |
