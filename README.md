@@ -123,6 +123,10 @@ Los dos tienen que tener pokewalk (la misma versión) y estar en la misma red Wi
 3. Cuando los dos terminan, arranca la batalla. Se juega con las mismas teclas que la batalla normal (sin piloto
    automático). Cada turno los dos eligen; el turno se resuelve cuando contestaron ambos.
 
+4. **Revancha:** al terminar, si los dos aprietan **`R`** se vuelve a la sala con la misma conexión (sin buscar la sala
+   ni escribir IPs). Ahí **Enter solo repite el mismo equipo y los mismos ataques** (con la vida y los PP completos), o
+   se arma otro equipo como la primera vez. Enter sale de la sala.
+
 El que creó la sala hace de árbitro (resuelve cada turno y le manda el resultado al otro), así no se desincroniza.
 Si alguien huye (`3` / `q`) o se cae la conexión, el otro lo ve y gana. Es para jugar entre amigos: los equipos los arma
 cada uno, así que nada impide hacer trampa a propósito.

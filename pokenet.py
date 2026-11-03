@@ -542,10 +542,14 @@ class Versus:
         ("error", txt)   se cortó o falló algo: cerrar la sala
     """
 
-    def __init__(self, name):
-        self.name, self.peer, self.role = name, "", None
+    def __init__(self, name, link=None, peer="", role=None, prev=None):
+        """Con `link` (revancha) se retoma la sala con el mismo amigo y la misma conexión, directo en "armá tu
+        equipo". `prev` = (equipo, sprites) de la pelea anterior, para repetirlo con un Enter."""
+        self.name, self.peer, self.role = name, peer, role
         self.stage = "menu"
         self.room = self.finder = self.link = None
+        self.prev_team, self.prev_sprites = prev if prev else (None, None)
+        self._ask_team = False
         self.target = ""
         self.my = self.my_sprites = self.foe = None
         self.closed = False
@@ -556,7 +560,9 @@ class Versus:
         self.noperm = False        # Windows no dio el permiso: puede que el amigo no pueda conectarse
         self._lock = threading.Lock()
         self._hello = False
-        if os.name == "nt" and not _fw_ok:             # antes de nada: que Windows deje pasar a pokewalk
+        if link:                                       # revancha: ya estamos conectados y el permiso está dado
+            self.link, self._hello, self.stage, self._ask_team = link, True, "team", True
+        elif os.name == "nt" and not _fw_ok:           # antes de nada: que Windows deje pasar a pokewalk
             self.stage = "firewall"
             threading.Thread(target=self._firewall, daemon=True).start()
 
@@ -697,6 +703,9 @@ class Versus:
         if self._fail:
             fail, self._fail = self._fail, ""
             return ("error", fail)
+        if self._ask_team:
+            self._ask_team = False
+            return ("team",)
         if self.stage == "firewall":
             with self._lock:
                 res = self._fw
@@ -801,18 +810,44 @@ class Session:
     (("steps", pasos) cuando hay un turno para animar, ("end", texto) cuando se acaba o se cae todo)
     y `close()` al salir."""
 
+    role = None                 # "host" | "guest"
+
     def __init__(self, battle, link, peer):
         self.b, self.link, self.peer = battle, link, peer
         self.done = False       # la batalla terminó: ya no importa si el otro se va
         self.left = False
+        self.want = self.peer_want = self.rematching = False       # revancha: quién la pidió
         self.out = []
 
     def _left(self, kind):
-        if self.done or self.left:
+        if self.left:
             return
         self.left = True
+        if self.done:                       # ya había terminado: solo se pierde la posibilidad de revancha
+            self.out.append(("gone",))
+            return
         self.out.append(("end", f"¡{self.peer} huyó del combate!  ¡Ganaste!" if kind == "bye"
                          else f"Se cortó la conexión con {self.peer}."))
+
+    # --- revancha: cuando los dos la piden se vuelve a la sala (misma conexión, sin IPs ni búsqueda)
+    def rematch(self):
+        """Pedir la revancha (después de terminada la batalla)."""
+        if self.done and not self.left and not self.want:
+            self.want = True
+            self.link.send({"t": "rematch"})
+            self._check_rematch()
+
+    def _on_rematch(self):
+        if not self.peer_want:
+            self.peer_want = True
+            if not self.want:
+                self.out.append(("peer_rematch",))
+            self._check_rematch()
+
+    def _check_rematch(self):
+        if self.want and self.peer_want and not self.rematching:
+            self.rematching = True
+            self.out.append(("rematch",))
 
     def _bad(self):
         if not self.done and not self.left:
@@ -826,6 +861,7 @@ class Session:
 
 class HostSession(Session):
     """El árbitro: tiene la batalla de verdad (lado 0 = yo, lado 1 = el invitado)."""
+    role = "host"
 
     def __init__(self, battle, link, peer):
         super().__init__(battle, link, peer)
@@ -896,6 +932,8 @@ class HostSession(Session):
                     self._choose(1, "act", m.get("a"))
                 elif t == "send":
                     self._choose(1, "send", m.get("i"))
+                elif t == "rematch":
+                    self._on_rematch()
                 elif t in ("bye", "_closed"):
                     self._left(t)
             except Exception:       # mensaje raro del otro lado: no tumbar la pantalla
@@ -906,6 +944,7 @@ class HostSession(Session):
 
 class GuestSession(Session):
     """El invitado: juega sobre una copia espejo (él es el lado 0) y solo repite lo que decide el árbitro."""
+    role = "guest"
 
     def act(self, action):
         self.link.send({"t": "act", "a": list(action)})
@@ -923,6 +962,8 @@ class GuestSession(Session):
                     load_state(self.b, m["state"])
                     self.done = self.b.over
                     self.out.append(("steps", steps))
+                elif t == "rematch":
+                    self._on_rematch()
                 elif t in ("bye", "_closed"):
                     self._left(t)
             except Exception:

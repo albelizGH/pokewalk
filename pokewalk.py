@@ -708,6 +708,7 @@ PROMPTS = {
     "info": "Info de (nombre, número o principio; Enter solo = uno que camina)",
     "vsip": "IP del amigo (ej. 192.168.1.20; Esc vuelve)",
     "vsteam": "Conectado con {peer}. Tu equipo (hasta 6; pika:60 = nivel 60; Enter solo = los que caminan)",
+    "vsteam_again": "Revancha con {peer}. Enter solo = el mismo equipo y ataques de recién; o armá otro (pika:60 char)",
 }
 
 
@@ -1102,6 +1103,8 @@ class BattleScene:
         self.target = list(self.shown)
         self.shake = [0.0, 0.0]
         self.auto, self.wait, self.over_t, self.forced = False, 0.0, 0.0, False
+        self.over_who, self.rematch_ok = "", False     # pantalla final: quién ganó, y si se puede pedir la revancha
+        self.asked = self.peer_asked = self.peer_gone = False
         self.note, self.note_t = "", 0.0
         self.anim_left = [0.0, 0.0]                    # lo que le queda a la animación de acción de cada lado
         self.down = [False, False]                     # debilitado y tirado en el piso
@@ -1207,23 +1210,48 @@ class BattleScene:
             self._start(self.b.send(idx))
 
     def _poll_net(self):
+        """Novedades de la red. Devuelve "rematch" cuando los dos pidieron la revancha."""
         for ev in self.net.poll():
             if ev[0] == "steps":
                 self.queued.append(ev[1])
             elif ev[0] == "end" and self.phase != "over":      # el otro se fue o se cortó la conexión
                 self.queued.clear()
                 self.phase, self.over_t = "over", 0.0
-                self.msg = ev[1] + "   Enter: volver"
+                self.over_who, self.rematch_ok = ev[1], False
+                self.msg = self._over_msg()
+            elif ev[0] == "peer_rematch":
+                self.peer_asked = True
+            elif ev[0] == "gone":                              # terminó la batalla y el otro cerró
+                self.peer_gone = True
+            elif ev[0] == "rematch":
+                return "rematch"
         if self.phase == "wait" and self.queued:
             self._start(self.queued.pop(0))
+        return None
+
+    def _over_msg(self):
+        """Texto de la pantalla final (con las opciones que haya)."""
+        who = self.over_who
+        if not (self.net and self.rematch_ok):
+            return who + "   Enter: volver"
+        peer = self.net.peer
+        if self.peer_gone:
+            return f"{who}   {peer} se fue.   Enter: volver"
+        if self.asked:
+            return f"{who}   Esperando a {peer}...   Enter: salir"
+        if self.peer_asked:
+            return f"{who}   ¡{peer} quiere revancha!   R: aceptar   Enter: salir"
+        return f"{who}   R: revancha   Enter: salir"
 
     def _finish(self):
         b = self.b
         self.wait = 0.8
         if b.over:
             self.phase, self.over_t = "over", 0.0
-            who = "¡Ganó tu equipo!" if b.winner == 0 else "¡Ganó el equipo rival!" if b.winner == 1 else "¡Empate!"
-            self.msg = who + "   Enter: volver"
+            self.over_who = ("¡Ganó tu equipo!" if b.winner == 0 else "¡Ganó el equipo rival!" if b.winner == 1
+                             else "¡Empate!")
+            self.rematch_ok = bool(self.net)
+            self.msg = self._over_msg()
         elif b.pending[0]:
             self.phase, self.forced = "switch", True
         elif self.net and b.pending[1]:                    # el rival está eligiendo a su reemplazo
@@ -1252,6 +1280,10 @@ class BattleScene:
         """Devuelve "done" (terminó la batalla) / "flee" (huiste) / None."""
         c, b = ch.lower(), self.b
         if self.phase == "over":
+            if c == "r" and self.net and self.rematch_ok and not self.peer_gone and not self.asked:
+                self.asked = True                      # los dos tienen que pedirla para volver a la sala
+                self.net.rematch()
+                return None
             return "done" if ch in ("\r", "\n", " ", "\x1b") or c == "q" else None
         if c == "q":
             return "flee"
@@ -1304,8 +1336,8 @@ class BattleScene:
         return None
 
     def update(self, dt, cols):
-        if self.net:
-            self._poll_net()
+        if self.net and self._poll_net() == "rematch":
+            return "rematch"
         for p in self.pets:
             p.tick_frame(dt)
         for s in (0, 1):                                    # las barras bajan de a poco
@@ -1326,7 +1358,9 @@ class BattleScene:
             self._play(dt)
         elif self.phase == "over":
             self.over_t += dt
-            if self.over_t > 15:                            # se aburrió de esperar
+            if self.net and self.rematch_ok:
+                self.msg = self._over_msg()                 # cambia cuando el otro pide la revancha o se va
+            if self.over_t > (180 if self.net else 15):     # se aburrió de esperar
                 return "done"
         elif self.auto:
             self.wait -= dt
@@ -1743,11 +1777,19 @@ def main():
             vs.connect(host, port)
 
     def end_scene(how):
-        nonlocal scene
-        if scene.net:
-            scene.net.close()
-        if how == "flee":
-            flash("¡Escapaste del combate!", 3)
+        nonlocal scene, vs
+        sess = scene.net
+        if how == "rematch":
+            # los dos la pidieron: de vuelta a la sala con el mismo amigo y la misma conexión (sin IPs ni búsqueda).
+            # El equipo de recién se puede repetir con un Enter (copias nuevas, con todo el HP y los PP).
+            prev = ([pn.fighter_from_wire(pn.fighter_to_wire(f)) for f in scene.b.teams[0]], list(scene.sprites[0]))
+            vs = pn.Versus(pn.player_name(), sess.link, sess.peer, sess.role, prev)
+            flash(f"¡Revancha con {sess.peer}!", 3)
+        else:
+            if sess:
+                sess.close()
+            if how == "flee":
+                flash("¡Escapaste del combate!", 3)
         scene = None
 
     try:
@@ -1880,7 +1922,10 @@ def main():
                         elif mode == "pet":
                             pet_them(parts)
                         elif mode == "vsteam":
-                            if vs:
+                            if vs and not parts and vs.prev_team:       # revancha: Enter solo = el mismo equipo y ataques
+                                vs.set_team(vs.prev_team, vs.prev_sprites)
+                                flash(f"Mismo equipo y ataques. Esperando a {vs.peer}...", 4)
+                            elif vs:
                                 vs.stage = "loading"
                                 flash("Buscando tu equipo en internet... (la primera vez tarda)", 90)
                                 threading.Thread(target=load_my_team, daemon=True,
@@ -1948,8 +1993,9 @@ def main():
                 w("\x1b[2J")
 
             if scene:
-                if scene.update(dt, cols):
-                    end_scene("done")
+                how = scene.update(dt, cols)
+                if how:
+                    end_scene(how)
                     w("\x1b[2J")
                 else:
                     frame = (render_sixel(scene.visible(), cols, rows, bg, reserve=2) if args.sixel
@@ -1974,7 +2020,7 @@ def main():
             elif mode:
                 label = f"{prompt_err}  →  corregí y Enter (Esc cancela)" if prompt_err else PROMPTS[mode]
                 if mode == "vsteam" and vs and not prompt_err:
-                    label = PROMPTS[mode].format(peer=vs.peer)
+                    label = PROMPTS["vsteam_again" if vs.prev_team else "vsteam"].format(peer=vs.peer)
                 status = prompt_line(label, buf, cur, cols)
             elif picker:
                 block = picker.lines(cols, avail)
