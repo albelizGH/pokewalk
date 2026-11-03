@@ -15,6 +15,7 @@ programar ataque por ataque) y la tabla de tipos. Los ataques cuyo efecto no sop
 """
 import json
 import random
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -59,6 +60,27 @@ BANNED = {
 
 def pretty(name):
     return name.replace("-", " ").title()
+
+
+# Los textos de un turno se escriben una sola vez, pero en una batalla en red cada jugador los lee desde su
+# lado ("¡Ganó tu equipo!" para uno es "¡Ganó el equipo rival!" para el otro). Lo que depende de la
+# perspectiva se marca con side_text() y se resuelve al mostrarlo, con resolve_text().
+_SIDE_RE = re.compile("\x02(\\d)\x1f(.*?)\x1f(.*?)\x03", re.S)
+
+
+def side_text(s, mine, theirs):
+    """`mine` lo lee quien juega el lado `s`; el otro lee `theirs`."""
+    return f"\x02{s}\x1f{mine}\x1f{theirs}\x03"
+
+
+def resolve_text(text, me=0):
+    """Texto final para quien juega el lado `me`."""
+    return _SIDE_RE.sub(lambda m: m.group(2) if int(m.group(1)) == me else m.group(3), text)
+
+
+def flip_text(text):
+    """El mismo texto, visto desde el otro lado."""
+    return _SIDE_RE.sub(lambda m: side_text(1 - int(m.group(1)), m.group(2), m.group(3)), text)
 
 
 def get_json(fetch, url, cache_name):
@@ -162,9 +184,10 @@ def load_move(fetch, name):
         flinch=meta.get("flinch_chance") or 0, crit=meta.get("crit_rate") or 0)
 
 
-def candidate_moves(moves_json, level=LEVEL):
+def candidate_moves(moves_json, level=LEVEL, pool=False):
     """Nombres de ataques a probar: los que aprende por nivel hasta `level` (los más nuevos primero)
-    más algunos de otros métodos (MT, huevo...), menos cuanto más bajo el nivel."""
+    más algunos de otros métodos (MT, huevo...), menos cuanto más bajo el nivel.
+    Con `pool` se prueban bastantes más: es el menú entre el que elige el jugador."""
     by_level, other = {}, []
     for m in moves_json:
         name = m["move"]["name"]
@@ -178,8 +201,10 @@ def candidate_moves(moves_json, level=LEVEL):
             other.append(name)
         else:
             by_level[name] = best
-    top = sorted(by_level, key=by_level.get, reverse=True)[:12]
+    top = sorted(by_level, key=by_level.get, reverse=True)[:24 if pool else 12]
     extra = 14 if level >= 40 else 8 if level >= 25 else 3      # a nivel bajo casi no tiene MT
+    if pool:
+        extra *= 3
     return top + random.sample(other, min(extra, len(other)))
 
 
@@ -213,13 +238,32 @@ def calc_stats(base, level=LEVEL):
     return out
 
 
-def load_fighter(fetch, dex, key, level=LEVEL):
+def load_fighter(fetch, dex, key, level=LEVEL, with_pool=False):
+    """Un Pokémon listo para pelear, con los ataques sorteados. Con `with_pool` devuelve además
+    (Fighter, lista de todos los ataques entre los que se puede elegir), para que el jugador arme su set."""
     p = get_json(fetch, f"{API}/pokemon/{dex}", f"api/pokemon-{dex}.json")
     base = {STAT_KEYS[s["stat"]["name"]]: s["base_stat"] for s in p["stats"]}
     types = [t["type"]["name"] for t in p["types"]]
     with ThreadPoolExecutor(8) as ex:
-        found = [m for m in ex.map(lambda n: load_move(fetch, n), candidate_moves(p["moves"], level)) if m]
-    return Fighter(pretty(key), dex, types, calc_stats(base, level), choose_moves(found, types), level=level)
+        found = [m for m in ex.map(lambda n: load_move(fetch, n),
+                                   candidate_moves(p["moves"], level, pool=with_pool)) if m]
+    fighter = Fighter(pretty(key), dex, types, calc_stats(base, level), choose_moves(found, types), level=level)
+    if not with_pool:
+        return fighter
+    seen, pool = set(), []
+    for m in found:
+        if m.name not in seen:
+            seen.add(m.name)
+            pool.append(m)
+    # primero los de daño (los más fuertes arriba, con bonus STAB), después los de estado
+    pool.sort(key=lambda m: (not m.power, -(m.power * (m.acc or 100) * (1.5 if m.type in types else 1.0))))
+    return fighter, pool or [FALLBACK_MOVE]
+
+
+def set_moves(f, moves):
+    """Cambia el set de ataques de un Pokémon (con sus PP completos)."""
+    f.moves = list(moves)[:4] or [FALLBACK_MOVE]
+    f.pp = [m.pp for m in f.moves]
 
 
 def describe(fetch, dex, key):
@@ -276,7 +320,7 @@ class Step:
 
 
 class Battle:
-    """Dos equipos. Lado 0 = vos, lado 1 = rival (lo maneja `ai_action`)."""
+    """Dos equipos. Lado 0 = vos, lado 1 = rival (lo maneja `ai_action`, o una persona en una batalla en red)."""
 
     def __init__(self, team_a, team_b, chart):
         self.teams = [team_a, team_b]
@@ -285,6 +329,7 @@ class Battle:
         self.over = False
         self.winner = None
         self.pending = [False, False]        # el lado tiene que elegir reemplazo
+        self.human = [True, False]           # lados que eligen solos su reemplazo (el resto lo elige `best_replacement`)
 
     # --- consultas
     def fighter(self, s):
@@ -295,7 +340,7 @@ class Battle:
 
     def lab(self, s):
         f = self.fighter(s)
-        return f.name if s == 0 else f"{f.name} rival"
+        return side_text(s, f.name, f"{f.name} rival")
 
     def snap(self):
         """(índice activo, estado, confuso, HP de todo el equipo) por lado."""
@@ -369,9 +414,10 @@ class Battle:
         return ("move", max(usable, key=lambda i: self._score(f, foe, f.moves[i]) + random.uniform(0, 0.03)))
 
     # --- turnos
-    def turn(self, action):
-        """Resuelve un turno completo ("move", i) / ("switch", i) y devuelve los pasos para animarlo."""
-        acts = [action, self.ai_action(1)]
+    def turn(self, action, foe_action=None):
+        """Resuelve un turno completo ("move", i) / ("switch", i) y devuelve los pasos para animarlo.
+        El rival juega `foe_action` (otra persona, en red) o, si no hay, lo que decida `ai_action`."""
+        acts = [action, foe_action if foe_action is not None else self.ai_action(1)]
         for s in (0, 1):
             self.fighter(s).flinch = False
         steps = []
@@ -391,10 +437,10 @@ class Battle:
         steps += self._replacements()
         return steps
 
-    def send(self, idx):
-        """Reemplazo elegido por el jugador después de que se debilita su Pokémon."""
-        self.pending[0] = False
-        return self._switch(0, idx, forced=True)
+    def send(self, idx, s=0):
+        """Reemplazo elegido por el jugador del lado `s` después de que se debilita su Pokémon."""
+        self.pending[s] = False
+        return self._switch(s, idx, forced=True)
 
     def _replacements(self):
         steps = []
@@ -402,21 +448,21 @@ class Battle:
             return steps
         for s in (1, 0):
             if self.fighter(s).hp <= 0:
-                if s == 1:
-                    steps += self._switch(1, self.best_replacement(1), forced=True)
+                if self.human[s]:
+                    self.pending[s] = True
                 else:
-                    self.pending[0] = True
+                    steps += self._switch(s, self.best_replacement(s), forced=True)
         return steps
 
     def _switch(self, s, idx, forced=False):
         old, steps = self.fighter(s), []
         if not forced and old.hp > 0:
-            steps.append(self.step(f"¡Vuelve {old.name}!" if s == 0 else f"¡El rival retira a {old.name}!", dur=1.0))
+            steps.append(self.step(side_text(s, f"¡Vuelve {old.name}!", f"¡El rival retira a {old.name}!"), dur=1.0))
         old.stages = {k: 0 for k in STAT_ES}
         old.confused, old.flinch = 0, False
         self.active[s] = idx
         new = self.fighter(s)
-        steps.append(self.step(f"¡Adelante, {new.name}!" if s == 0 else f"¡El rival envía a {new.name}!", dur=1.3))
+        steps.append(self.step(side_text(s, f"¡Adelante, {new.name}!", f"¡El rival envía a {new.name}!"), dur=1.3))
         return steps
 
     def _check_faints(self, att_side=None):
@@ -431,7 +477,8 @@ class Battle:
             if wiped:
                 self.over = True
                 self.winner = 1 - wiped[0] if len(wiped) == 1 else (None if att_side is None else 1 - att_side)
-                steps.append(self.step("¡Ganó tu equipo!" if self.winner == 0 else "¡Ganó el equipo rival!", dur=1.8))
+                steps.append(self.step("¡Empate!" if self.winner is None else
+                                       side_text(self.winner, "¡Ganó tu equipo!", "¡Ganó el equipo rival!"), dur=1.8))
         return steps
 
     def _can_move(self, s, steps):

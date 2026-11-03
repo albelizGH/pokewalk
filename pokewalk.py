@@ -44,6 +44,7 @@ except ImportError:
     sys.exit("Falta Pillow:  pip install pillow")
 
 import pokebattle as pb
+import pokenet as pn
 
 SPRITE_URL = "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/sprite/{id:04d}/{file}"
 SPECIES_URL = "https://raw.githubusercontent.com/PokeAPI/pokeapi/master/data/v2/csv/pokemon_species.csv"
@@ -705,6 +706,8 @@ PROMPTS = {
     "battle": "Batalla (pika char = 1 vs 1;  pika char vs mew snor = equipos;  Enter solo = 3 vs 3 al azar)",
     "pet": "Mimar a (nombre, número o principio; Enter solo = uno al azar)",
     "info": "Info de (nombre, número o principio; Enter solo = uno que camina)",
+    "vsip": "IP del amigo (ej. 192.168.1.20; Esc vuelve)",
+    "vsteam": "Conectado con {peer}. Tu equipo (hasta 6; pika:60 = nivel 60; Enter solo = los que caminan)",
 }
 
 
@@ -748,18 +751,25 @@ def expand_name(term, walking):
     return next((n for n in reversed(walking) if n.startswith(t)), t)
 
 
+def battle_sprite(loader, dex):
+    """Sprite con las animaciones de combate (se baja una sola vez)."""
+    if (dex, "batalla") not in loader.cache:
+        loader.cache[(dex, "batalla")] = Sprite(dex, loader.scale, battle=True)
+    return loader.cache[(dex, "batalla")]
+
+
+def build_fighter(spec, loader, walking=()):
+    """(nombre, nivel) -> (Fighter, sprite). Bloquea: busca stats y ataques en PokeAPI y baja el sprite."""
+    name, level = spec
+    dex, key = resolve(expand_name(name, walking))
+    return pb.load_fighter(fetch, dex, key, level), battle_sprite(loader, dex)
+
+
 def build_battle(sides, loader, walking=()):
     """sides = [[(nombre, nivel), ...] (vos), [...] (rival)] -> (Battle, sprites). Bloquea mientras busca
     en PokeAPI stats y ataques de todos (más la tabla de tipos) y baja los sprites: va siempre en un hilo."""
-    def build(spec):
-        name, level = spec
-        dex, key = resolve(expand_name(name, walking))
-        if (dex, "batalla") not in loader.cache:         # versión con las animaciones de combate
-            loader.cache[(dex, "batalla")] = Sprite(dex, loader.scale, battle=True)
-        return pb.load_fighter(fetch, dex, key, level), loader.cache[(dex, "batalla")]
-
     with ThreadPoolExecutor(4) as ex:
-        built = list(ex.map(build, [spec for side in sides for spec in side]))
+        built = list(ex.map(lambda spec: build_fighter(spec, loader, walking), [spec for side in sides for spec in side]))
     teams, sprites, k = [], [], 0
     for side in sides:
         chunk = built[k:k + len(side)]
@@ -794,6 +804,115 @@ def prepare_gym_battle(trainer, mine, loader, jobs):
         jobs.put(("battle", battle, sprites, intro))
     except Exception as e:
         jobs.put(("gerror", f"No pude preparar el combate: {e}", 6))
+
+
+def load_my_team(parts, loader, jobs, walking):
+    """Hilo (versus): arma tu equipo. Cada término es `nombre` o `nombre:nivel` (nivel 1-100, por defecto 50);
+    sin nada, los que caminan (o 3 al azar)."""
+    try:
+        specs = []
+        for term in (parts or list(walking)[:pn.MAX_TEAM]):
+            name, _, lvl = term.partition(":")
+            try:
+                level = max(1, min(100, int(lvl))) if lvl else pb.LEVEL
+            except ValueError:
+                raise ValueError(f"nivel inválido: {term}") from None
+            specs.append((name, level))
+        if len(specs) > pn.MAX_TEAM:
+            raise ValueError(f"hasta {pn.MAX_TEAM} Pokémon por equipo")
+        specs = specs or [(str(random.randint(1, 493)), pb.LEVEL) for _ in range(3)]
+        def build(spec):
+            dex, key = resolve(expand_name(spec[0], walking))
+            f, pool = pb.load_fighter(fetch, dex, key, spec[1], with_pool=True)
+            return f, pool, battle_sprite(loader, dex)
+
+        with ThreadPoolExecutor(3) as ex:
+            built = list(ex.map(build, specs))
+        jobs.put(("vspool", [b[0] for b in built], [b[1] for b in built], [b[2] for b in built]))
+    except Exception as e:
+        jobs.put(("vserror", f"No pude armar el equipo: {e}", 6))
+
+
+class MovePicker:
+    """Menú (en la línea de arriba) para elegir hasta 4 ataques de cada Pokémon de tu equipo, entre todos los que
+    puede usar a su nivel. Arranca con el set sorteado marcado: Enter lo deja así."""
+    HEAD = 56       # columnas que se reservan para el encabezado y las teclas
+
+    def __init__(self, fighters, pools):
+        self.fighters, self.pools = fighters, pools
+        self.i, self.page = 0, 0
+        self.sel = []
+        for f, pool in zip(fighters, pools):
+            names = {m.name for m in f.moves}
+            self.sel.append([k for k, m in enumerate(pool) if m.name in names][:4])
+
+    def _pages(self, cols):
+        """Reparte los ataques en páginas que entren en el ancho de la terminal (máx. 9, uno por dígito)."""
+        pool, pages, cur, used = self.pools[self.i], [], [], 0
+        room = max(30, cols - self.HEAD)
+        for k, m in enumerate(pool):
+            w = len(self._label(0, k, m)) + 2
+            if cur and (used + w > room or len(cur) == 9):
+                pages.append(cur)
+                cur, used = [], 0
+            cur.append(k)
+            used += w
+        return pages + [cur]
+
+    def _label(self, n, k, m):
+        mark = "*" if k in self.sel[self.i] else ""
+        kind = "estado" if not m.power else str(m.power)
+        return f"{n}{mark} {m.name} ({pb.TYPES_ES[m.type][:3]} {kind})"
+
+    def text(self, cols):
+        f, pages = self.fighters[self.i], self._pages(cols)
+        self.page = min(self.page, len(pages) - 1)
+        items = "  ".join(self._label(n + 1, k, self.pools[self.i][k]) for n, k in enumerate(pages[self.page]))
+        last = self.i == len(self.fighters) - 1
+        return (f"{f.name} Nv{f.level} ({self.i + 1}/{len(self.fighters)}) {len(self.sel[self.i])}/4 · {items} · "
+                f"pág {self.page + 1}/{len(pages)} ←→  Enter={'listo' if last else 'sigue'}  r=azar")
+
+    def key(self, ch, cols):
+        """Devuelve "done" al confirmar el último Pokémon."""
+        pages = self._pages(cols)
+        sel = self.sel[self.i]
+        if ch == K_RIGHT:
+            self.page = (self.page + 1) % len(pages)
+        elif ch == K_LEFT:
+            self.page = (self.page - 1) % len(pages)
+        elif ch.isdigit() and ch != "0" and int(ch) <= len(pages[min(self.page, len(pages) - 1)]):
+            k = pages[min(self.page, len(pages) - 1)][int(ch) - 1]
+            if k in sel:
+                sel.remove(k)
+            elif len(sel) < 4:
+                sel.append(k)
+        elif ch in ("r", "R"):
+            self.sel[self.i] = sorted(random.sample(range(len(self.pools[self.i])), min(4, len(self.pools[self.i]))))
+        elif ch in ("\r", "\n") and sel:
+            if self.i == len(self.fighters) - 1:
+                for f, pool, s in zip(self.fighters, self.pools, self.sel):
+                    pb.set_moves(f, [pool[k] for k in s])
+                return "done"
+            self.i, self.page = self.i + 1, 0
+        return None
+
+
+def prepare_versus(vs, loader, jobs):
+    """Hilo (versus): con los dos equipos ya en la mano, baja los sprites del rival y arma la batalla."""
+    try:
+        foe_sprites = [battle_sprite(loader, f.dex) for f in vs.foe]
+        chart = pb.TypeChart(fetch)
+        chart.preload({m.type for team in (vs.my, vs.foe) for f in team for m in f.moves})
+        battle = pb.Battle(vs.my, vs.foe, chart)            # el invitado juega sobre una copia espejo
+        battle.human = [True, True]
+        link = vs.take_link()
+        if link is None:                                    # cancelaron mientras tanto
+            return
+        session = (pn.HostSession if vs.role == "host" else pn.GuestSession)(battle, link, vs.peer)
+        intro = [f"¡Versus! {vs.name} contra {vs.peer}", f"{len(vs.my)} contra {len(vs.foe)}"]
+        jobs.put(("vsbattle", battle, [vs.my_sprites, foe_sprites], intro, session))
+    except Exception as e:
+        jobs.put(("vsfatal", f"No pude preparar la batalla: {e}", 6))
 
 
 def load_gyms():
@@ -858,8 +977,10 @@ class BattleScene:
     Cada ataque usa las animaciones de PMD del Pokémon (Attack / Shoot / Charge, Hurt, Faint, Sleep) y,
     si tiene sentido, un proyectil y un destello del color del tipo."""
 
-    def __init__(self, battle, sprites, ppc, intro=None):
+    def __init__(self, battle, sprites, ppc, intro=None, net=None):
         self.b, self.sprites, self.ppc = battle, sprites, ppc     # sprites[lado][índice en el equipo]
+        self.net = net          # pokenet.Session si el rival es un amigo en red (si no, lo maneja la computadora)
+        self.queued = []        # turnos que llegaron por la red y esperan su turno para animarse
         self.active = [0, 0]
         self.pets = [self._mkpet(0, 0), self._mkpet(1, 0)]
         self.hidden = [False, False]
@@ -910,7 +1031,7 @@ class BattleScene:
 
     def _begin(self):
         st = self.steps[self.step_i]
-        self.msg, self.step_t, self.applied = st.text, 0.0, False
+        self.msg, self.step_t, self.applied = pb.resolve_text(st.text), 0.0, False
         self.fx, self.lunge = [], False
         self.hit_t = 0.25 if st.atk is not None else 0.0     # cuándo cae el daño dentro del paso
         self.dur_eff = st.dur
@@ -957,7 +1078,30 @@ class BattleScene:
                             "kind": "burst", "src": s, "dst": st.tgt})
 
     def _act(self, action):
-        self._start(self.b.turn(action))
+        if self.net:                                   # contra un amigo: lo manda y espera la respuesta del árbitro
+            self.net.act(action)
+            self.phase = "wait"
+        else:
+            self._start(self.b.turn(action))
+
+    def _send(self, idx):
+        """Reemplazo obligatorio después de que se debilita tu Pokémon."""
+        if self.net:
+            self.net.send(idx)
+            self.phase = "wait"
+        else:
+            self._start(self.b.send(idx))
+
+    def _poll_net(self):
+        for ev in self.net.poll():
+            if ev[0] == "steps":
+                self.queued.append(ev[1])
+            elif ev[0] == "end" and self.phase != "over":      # el otro se fue o se cortó la conexión
+                self.queued.clear()
+                self.phase, self.over_t = "over", 0.0
+                self.msg = ev[1] + "   Enter: volver"
+        if self.phase == "wait" and self.queued:
+            self._start(self.queued.pop(0))
 
     def _finish(self):
         b = self.b
@@ -968,6 +1112,8 @@ class BattleScene:
             self.msg = who + "   Enter: volver"
         elif b.pending[0]:
             self.phase, self.forced = "switch", True
+        elif self.net and b.pending[1]:                    # el rival está eligiendo a su reemplazo
+            self.phase, self.forced = "wait", False
         else:
             self.phase, self.forced = "main", False
 
@@ -996,8 +1142,11 @@ class BattleScene:
         if c == "q":
             return "flee"
         if c == "a":
-            self.auto = not self.auto
-            self.wait = 0.3
+            if self.net:
+                self._tell("No hay piloto automático contra un amigo")
+            else:
+                self.auto = not self.auto
+                self.wait = 0.3
             return None
         back = c == "0" or ch in ("\x1b", "\x08", "\x7f")
         mine = b.fighter(0)
@@ -1035,12 +1184,14 @@ class BattleScene:
                 elif i == b.active[0]:
                     self._tell(f"¡{f.name} ya está en combate!")
                 elif self.forced:
-                    self._start(b.send(i))
+                    self._send(i)
                 else:
                     self._act(("switch", i))
         return None
 
     def update(self, dt, cols):
+        if self.net:
+            self._poll_net()
         for p in self.pets:
             p.tick_frame(dt)
         for s in (0, 1):                                    # las barras bajan de a poco
@@ -1125,8 +1276,10 @@ class BattleScene:
     def menu(self):
         b = self.b
         me, foe = b.fighter(0), b.fighter(1)
+        if self.phase == "wait":
+            return "Esperando al rival...   (q: huir)"
         if self.phase == "main":
-            return f"¿Qué hará {me.name}?   1 Luchar   2 Pokémon   3 Huir   (a: automático)"
+            return f"¿Qué hará {me.name}?   1 Luchar   2 Pokémon   3 Huir" + ("" if self.net else "   (a: automático)")
         if self.phase == "fight":
             if not any(p > 0 for p in me.pp):
                 return "1 Forcejeo (sin PP)   0 volver"
@@ -1207,10 +1360,16 @@ def main():
     battling = False       # preparando una pelea (buscando datos en internet)
     gyms = load_gyms()     # regiones -> grupos -> entrenadores (gimnasios.json)
     gym = None             # menú de combates (tecla g): {"stage": 0..3, "r": región, "g": grupo, "t": entrenador}
+    vs = None              # sala de versus en red (tecla v): pokenet.Versus
+    picker = None          # elegir ataques del equipo de versus: MovePicker
     w = sys.stdout.write
     w("\x1b[?1049h\x1b[?25l\x1b[2J")
 
     def bye(*_):
+        if scene and scene.net:
+            scene.net.close()
+        if vs:
+            vs.close()
         try:
             os.remove(ALIVE_FILE)
         except OSError:
@@ -1364,8 +1523,33 @@ def main():
         if missing:
             flash("No está: " + ", ".join(missing), 3)
 
+    def close_vs(text="", secs=5):
+        """Sale de la sala de versus (avisa al amigo) y cierra lo que estuviera abierto."""
+        nonlocal vs, picker, mode, buf
+        if vs:
+            vs.close()
+        vs = picker = None
+        if mode in ("vsteam", "vsip"):
+            mode, buf = None, ""
+        if text:
+            flash(text, secs)
+
+    def vs_connect(text):
+        """Tecla v -> 3: `ip` o `ip:puerto`."""
+        host, _, port = text.strip().partition(":")
+        try:
+            port = int(port) if port else pn.TCP_PORT
+        except ValueError:
+            port = -1
+        if not host or not 0 < port < 65536:
+            flash("Escribí la IP del amigo (ej. 192.168.1.20)", 4)
+        elif vs:
+            vs.connect(host, port)
+
     def end_scene(how):
         nonlocal scene
+        if scene.net:
+            scene.net.close()
         if how == "flee":
             flash("¡Escapaste del combate!", 3)
         scene = None
@@ -1383,7 +1567,27 @@ def main():
                     battling, redraw = False, True
                     scene = BattleScene(job[1], job[2], px_per_col, job[3])
                     flash("", 0)
-                else:                                           # "flash" | "error" | "berror" | "ierror"
+                elif job[0] == "vspool":                        # tu equipo cargó: ahora elegís los ataques
+                    if vs:
+                        picker = MovePicker(job[1], job[2])
+                        vs.my_sprites, vs.stage = job[3], "moves"
+                        flash("", 0)
+                elif job[0] == "vsbattle":                      # los dos equipos listos: empieza el versus
+                    if vs is None:                              # cancelaron mientras se preparaba
+                        job[4].close()
+                    else:
+                        vs, redraw = None, True
+                        scene = BattleScene(job[1], job[2], px_per_col, job[3], job[4])
+                        flash("", 0)
+                elif job[0] == "vserror":                       # falló el equipo: reabrir el prompt con lo escrito
+                    flash(job[1], job[2])
+                    if vs and mode is None:
+                        vs.stage = "team"
+                        mode, buf, prompt_err = "vsteam", last_input.get("vsteam", ""), job[1].rsplit(": ", 1)[-1]
+                        cur = len(buf)
+                elif job[0] == "vsfatal":
+                    close_vs(job[1], job[2])
+                else:                                          # "flash" | "error" | "berror" | "ierror"
                     battling = battling and job[0] not in ("berror", "gerror")
                     flash(job[1], job[2])
                     again = {"berror": "battle", "ierror": "info"}.get(job[0])
@@ -1416,6 +1620,16 @@ def main():
                 if not scene:
                     on_command(evs[-1])
 
+            # --- sala de versus
+            if vs:
+                ev = vs.update()
+                if ev and ev[0] == "team":
+                    mode, buf, cur, prompt_err = "vsteam", "", 0, ""
+                elif ev and ev[0] == "ready":
+                    threading.Thread(target=prepare_versus, args=(vs, loader, jobs), daemon=True).start()
+                elif ev and ev[0] == "error":
+                    close_vs(ev[1], 6)
+
             # --- teclado
             typed = keys.read()
             if typed:
@@ -1426,6 +1640,20 @@ def main():
                     if how:
                         end_scene(how)
                         redraw = True
+                    continue
+                if picker:
+                    if ch == "\x1b":
+                        close_vs("Saliste de la sala")
+                    elif picker.key(ch, cols) == "done":
+                        vs.set_team(picker.fighters, vs.my_sprites)
+                        picker = None
+                    continue
+                if vs and not mode:
+                    act = vs.key(ch)
+                    if act == "cancel":
+                        close_vs("Saliste de la sala", 2)
+                    elif act == "ip":
+                        mode, buf, cur, prompt_err = "vsip", "", 0, ""
                     continue
                 if gym:
                     gym_key(ch)
@@ -1456,11 +1684,21 @@ def main():
                             start_info(parts)
                         elif mode == "pet":
                             pet_them(parts)
+                        elif mode == "vsteam":
+                            if vs:
+                                vs.stage = "loading"
+                                flash("Buscando tu equipo en internet... (la primera vez tarda)", 90)
+                                threading.Thread(target=load_my_team, daemon=True,
+                                                 args=(parts, loader, jobs, [p.name for p in pets])).start()
+                        elif mode == "vsip":
+                            vs_connect(buf)
                         elif parts:
                             loader.request(parts, replace=(mode == "set"))
                             flash("Cargando " + ", ".join(parts) + "...", 30)
                         mode, buf = None, ""
                     elif ch == "\x1b":
+                        if mode == "vsteam":                      # ya estabas en la sala: Esc = salir de ella
+                            close_vs("Saliste de la sala", 2)
                         mode, buf, prompt_err = None, "", ""
                     elif ch in ("\x08", "\x7f"):
                         if cur:
@@ -1498,6 +1736,11 @@ def main():
                         mode, buf = "info", ""
                     elif c == "g":
                         gym = {"stage": 0}
+                    elif c == "v":
+                        if battling:
+                            flash("Esperá a que termine de prepararse la batalla", 3)
+                        else:
+                            vs = pn.Versus(pn.player_name())
                     elif c == "h" and pets:
                         mode, buf = "pet", ""
 
@@ -1530,12 +1773,18 @@ def main():
                 status = status_line(gym_text(), cols, True)
             elif mode:
                 label = f"{prompt_err}  →  corregí y Enter (Esc cancela)" if prompt_err else PROMPTS[mode]
+                if mode == "vsteam" and vs and not prompt_err:
+                    label = PROMPTS[mode].format(peer=vs.peer)
                 status = prompt_line(label, buf, cur, cols)
+            elif picker:
+                status = status_line(picker.text(cols), cols, True)
+            elif vs:
+                status = status_line(vs.text(), cols, True)
             elif time.time() < msg_until:
                 status = status_line(msg, cols, True)
             else:
                 lista = ", ".join(p.name for p in pets) or "(vacío)"
-                status = status_line(f"{lista}   ·  a agregar  c cambiar  x sacar  r azar  b batalla  g gimnasios  i info  h mimar  q salir", cols)
+                status = status_line(f"{lista}   ·  a agregar  c cambiar  x sacar  r azar  b batalla  v versus  g gimnasios  i info  h mimar  q salir", cols)
 
             frame = render_sixel(pets, cols, rows, bg) if args.sixel else render(pets, cols, rows)
             bub = bubbles(pets, cols, rows, args.sixel, px_per_col)

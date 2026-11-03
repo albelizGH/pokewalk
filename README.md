@@ -101,6 +101,33 @@ El rival **no usa IA**, son reglas (`Battle.ai_action` en `pokebattle.py`): casi
 esperado; a veces uno al azar; usa ataques de estado si le sirven (curarse con poca vida, subir stats, dormirte si no
 tenés estado); y cambia de Pokémon si el suyo casi no te hace daño y le pegás fuerte, o cuando se debilita.
 
+### Versus contra un amigo en la misma red (`v`)
+
+Los dos tienen que tener pokewalk (la misma versión) y estar en la misma red WiFi / LAN. No hace falta instalar nada más.
+
+1. Uno aprieta **`v`** y elige **1 Crear sala**. El otro aprieta **`v`** y elige **2 Buscar salas**: la sala aparece sola
+   en la lista (se anuncia por broadcast UDP) y la elige con su número. Si no aparece (algunas redes bloquean el
+   broadcast), **3 / `i` Conectar por IP**: se escribe la IP que muestra el que creó la sala.
+2. **Cada uno arma su equipo en la sala**: hasta 6 Pokémon (`pika char`, o `pika:60` para nivel 60; Enter solo = los
+   que caminan). Después **elegís los ataques de cada uno** entre todos los que puede usar a su nivel (hasta 4):
+
+   | Tecla | Qué hace |
+   |---|---|
+   | `1`-`9` | marcar / desmarcar ese ataque de la página (`*` = elegido; muestra tipo y poder) |
+   | `←` `→` | cambiar de página |
+   | `r` | cuatro ataques al azar |
+   | Enter | confirmar este Pokémon y pasar al siguiente (arranca con un set sorteado marcado: Enter lo deja así) |
+
+3. Cuando los dos terminan, arranca la batalla. Se juega con las mismas teclas que la batalla normal (sin piloto
+   automático). Cada turno los dos eligen; el turno se resuelve cuando contestaron ambos.
+
+El que creó la sala hace de árbitro (resuelve cada turno y le manda el resultado al otro), así no se desincroniza.
+Si alguien huye (`3` / `q`) o se cae la conexión, el otro lo ve y gana. Es para jugar entre amigos: los equipos los arma
+cada uno, así que nada impide hacer trampa a propósito.
+
+Si es la primera vez, el firewall de Windows va a preguntar si dejás a Python usar la red: aceptá en **redes privadas**.
+La sala usa el puerto TCP 5757 y los avisos van por UDP 5758.
+
 ### Combates de gimnasio (`g`)
 
 Menú con números: región (Kanto / Johto) → Gimnasios o Alto Mando y campeón → entrenador → vista previa de su equipo → Enter
