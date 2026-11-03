@@ -733,6 +733,83 @@ def status_line(text, cols, bright=False):
     return f"\x1b[1;1H\x1b[2K{color}{text}\x1b[0m"
 
 
+# --------------------------------------------------------------------------- menús de varias líneas
+# Con espacio arriba de los Pokémon los menús se dibujan en cuadrícula y con colores, como en los juegos;
+# si el panel es bajito (no hay filas libres) cada menú cae a su línea compacta de siempre.
+KEY, DIM, HI, GOOD, BAD, WARN = "\x1b[1;36m", "\x1b[90m", "\x1b[97m", "\x1b[32m", "\x1b[31m", "\x1b[33m"
+
+
+def rgb(c):
+    return "\x1b[38;2;%d;%d;%dm" % c
+
+
+def plen(parts):
+    return sum(len(t) for t, _ in parts)
+
+
+def seg(parts, width):
+    """Segmentos [(texto, estilo ANSI)] -> texto con colores, cortado y rellenado a `width` columnas."""
+    out, used = [], 0
+    for text, style in parts:
+        text = text[:max(0, width - used)]
+        if not text:
+            break
+        out.append(f"{style}{text}\x1b[0m" if style else text)
+        used += len(text)
+    return "".join(out) + " " * max(0, width - used)
+
+
+def opt(key, label, extra=()):
+    """Una opción de menú: la tecla resaltada y su texto (más segmentos opcionales)."""
+    return [(key, KEY), (" " + label, HI)] + list(extra)
+
+
+def flat(items, sep="   "):
+    """Varias opciones en una sola fila."""
+    out = []
+    for i, it in enumerate(items):
+        out += ([(sep, "")] if i else []) + it
+    return out
+
+
+def grid(title, items, foot, cols, rows_max, ncols=None):
+    """Menú en cuadrícula: título, opciones en columnas (de izquierda a derecha y de arriba abajo) y pie.
+    Si no entra en `rows_max` filas se saca primero el pie y después el título; si ni así entra devuelve None
+    y quien llama usa su línea compacta."""
+    width = max(10, cols - 1)
+    w = max((plen(it) for it in items), default=0) + 2
+    n = max(1, min(ncols or len(items) or 1, width // max(1, w)))
+    body = -(-len(items) // n) if items else 0
+    lines = (1 if title else 0) + body + (1 if foot else 0)
+    if lines > rows_max and foot:
+        foot, lines = None, lines - 1
+    if lines > rows_max and title:
+        title, lines = None, lines - 1
+    if lines > rows_max:
+        return None
+    cw = min(width // n, w + 6)             # columnas parejas pero sin separarlas de más en pantallas anchas
+    out = [seg(title, width)] if title else []
+    for r in range(body):
+        out.append("".join(seg(items[i], cw) for i in range(r * n, min(len(items), (r + 1) * n))))
+    if foot:
+        out.append(seg(foot, width))
+    return out
+
+
+def put_rows(lines, start=1, clear_to=0):
+    """Escribe `lines` desde la fila `start` y deja limpias las filas hasta `clear_to` (restos de un menú más alto)."""
+    last = max(start + len(lines) - 1, clear_to)
+    return "".join(f"\x1b[{r};1H\x1b[2K" + (lines[r - start] if r - start < len(lines) else "")
+                   for r in range(start, last + 1))
+
+
+def text_rows_free(pets, rows, sixel, reserve=1):
+    """Filas libres arriba de los Pokémon (las de texto), como mínimo `reserve`."""
+    if not pets:
+        return max(reserve, rows - 1)
+    return max(reserve, top_row_of(pets, rows, sixel, reserve) - 1)
+
+
 # --------------------------------------------------------------------------- batalla
 PET_LINES = ["<3", "¡Hola!", "¿Jugamos?", "¡Me encanta caminar!", "¡Qué lindo día!", "¿Me das una baya?", "¡Presente!"]
 
@@ -841,13 +918,50 @@ class MovePicker:
     def __init__(self, fighters, pools):
         self.fighters, self.pools = fighters, pools
         self.i, self.page = 0, 0
+        self.avail = 1          # filas de texto disponibles (lo fija `lines` en cada cuadro)
         self.sel = []
         for f, pool in zip(fighters, pools):
             names = {m.name for m in f.moves}
             self.sel.append([k for k, m in enumerate(pool) if m.name in names][:4])
 
+    def _cell(self, n, k, m):
+        """Un ataque en la cuadrícula: número, * si está elegido, nombre (color del tipo), tipo y poder."""
+        on = k in self.sel[self.i]
+        return [(str(n), KEY), ("*" if on else " ", GOOD),
+                (m.name, rgb(TYPE_COLORS.get(m.type, (255, 255, 255))) + ("\x1b[1m" if on else "")),
+                (f"  {pb.TYPES_ES[m.type][:3]} {m.power or 'estado'}", DIM)]
+
+    def _per(self, cols):
+        """Ataques por página en cuadrícula (máx. 9, uno por dígito), o None si no hay filas y va la línea compacta."""
+        if self.avail < 3:                                   # título + pie + al menos una fila de ataques
+            return None
+        w = max(plen(self._cell(9, k, m)) for k, m in enumerate(self.pools[self.i])) + 2
+        return max(1, min(9, max(1, min(3, max(10, cols - 1) // w)) * (self.avail - 2)))
+
+    def lines(self, cols, avail):
+        """El menú en cuadrícula, o None si no entra (se usa `text`)."""
+        self.avail = avail
+        per = self._per(cols)
+        if not per:
+            return None
+        pages = self._pages(cols)
+        self.page = min(self.page, len(pages) - 1)
+        f, sel, pool = self.fighters[self.i], self.sel[self.i], self.pools[self.i]
+        items = [self._cell(n + 1, k, pool[k]) for n, k in enumerate(pages[self.page])]
+        last = self.i == len(self.fighters) - 1
+        title = [(f"{f.name} Nv{f.level}", HI), (f"  ({self.i + 1}/{len(self.fighters)})   elegidos {len(sel)}/4: ", DIM),
+                 (", ".join(pool[k].name for k in sel) or "ninguno (marcá al menos uno)", GOOD if sel else WARN)]
+        foot = [("1-9", KEY), (" marcar   ", DIM), ("←→", KEY), (f" página {self.page + 1}/{len(pages)}   ", DIM),
+                ("Enter", KEY), (" listo   " if last else " siguiente Pokémon   ", DIM), ("r", KEY), (" al azar", DIM)]
+        return grid(title, items, foot, cols, avail, 3)
+
     def _pages(self, cols):
-        """Reparte los ataques en páginas que entren en el ancho de la terminal (máx. 9, uno por dígito)."""
+        """Reparte los ataques en páginas: de tamaño fijo en cuadrícula, o las que entren en el ancho en la línea
+        compacta (máx. 9, uno por dígito)."""
+        per = self._per(cols)
+        if per:
+            ks = list(range(len(self.pools[self.i])))
+            return [ks[j:j + per] for j in range(0, len(ks), per)] or [[]]
         pool, pages, cur, used = self.pools[self.i], [], [], 0
         room = max(30, cols - self.HEAD)
         for k, m in enumerate(pool):
@@ -1296,19 +1410,58 @@ class BattleScene:
             parts.append(f"{i + 1} {f.name} Nv{f.level} {f.hp}/{f.max_hp}{state}")
         return ("¡Elegí al próximo!  " if self.forced else "") + "  ".join(parts) + ("" if self.forced else "   0 volver")
 
-    def hud(self, cols):
-        """Fila 1: barras de HP, estado y equipo (vos a la izquierda, rival a la derecha). Fila 2: mensaje o menú."""
+    def _menu_cells(self, cols, avail):
+        """El menú como en los juegos: en cuadrícula y con colores (tipo del ataque, PP, efectividad, HP).
+        Devuelve las filas, o None si no hay lugar (entonces se usa `menu()`, la línea compacta)."""
+        b = self.b
+        me, foe = b.fighter(0), b.fighter(1)
+        width = max(10, cols - 1)
+        back = [("0", KEY), (" volver", DIM)]
+        if self.phase == "main" and avail >= 2:
+            keys = [opt("1", "Luchar"), opt("2", "Pokémon"), opt("3", "Huir")]
+            if not self.net:
+                keys.append(opt("a", "Automático"))
+            return [seg([(f"¿Qué hará {me.name}?", HI)], width), seg(flat(keys, "     "), width)]
+        if self.phase == "fight":
+            if not any(p > 0 for p in me.pp):
+                return grid(None, [opt("1", "Forcejeo (sin PP)")], back, cols, avail, 1)
+            items = []
+            for i, m in enumerate(me.moves):
+                e = b.chart.mult(m.type, foe.types) if m.power else 1
+                eff = [] if e == 1 else [(" x2", GOOD)] if e > 1 else [(" x½", BAD)] if e > 0 else [(" x0", BAD)]
+                pp = me.pp[i]
+                items.append([(str(i + 1), KEY), (" " + m.name, rgb(TYPE_COLORS.get(m.type, (255, 255, 255)))),
+                              (f"  {pp}/{m.pp}", BAD if pp == 0 else WARN if pp <= 2 else DIM),
+                              (f"  {pb.TYPES_ES[m.type][:3]} {m.power or 'estado'}", DIM)] + eff)
+            return grid(None, items, back, cols, avail, 2)
+        if self.phase == "switch":
+            items = []
+            for i, f in enumerate(b.teams[0]):
+                ratio = f.hp / f.max_hp
+                hp = [("  K.O.", BAD)] if f.hp <= 0 else \
+                     [(f"  {f.hp}/{f.max_hp}", GOOD if ratio > 0.5 else WARN if ratio > 0.2 else BAD)]
+                here = i == b.active[0]
+                items.append([(str(i + 1), KEY), (("▶" if here else " ") + f.name, WARN if here else DIM if f.hp <= 0 else HI),
+                              (f" Nv{f.level}", DIM)] + hp)
+            title = [("¡Elegí al próximo Pokémon!", WARN)] if self.forced else None
+            return grid(title, items, None if self.forced else back, cols, avail, 3)
+        return None
+
+    def hud(self, cols, avail=1):
+        """Fila 1: barras de HP, estado y equipo (vos a la izquierda, rival a la derecha). Debajo, hasta `avail`
+        filas: el mensaje o el menú."""
         (lp, la), (rp, ra) = self._bar(0, cols), self._bar(1, cols)
         out = f"\x1b[1;1H\x1b[2K{la}\x1b[1;{max(len(lp) + 2, cols - len(rp))}H{ra}"
+        width = max(10, cols - 1)
         if self.phase in ("play", "over"):
-            text = self.msg
+            lines = [seg([(self.msg, HI)], width)]
         elif self.note_t > 0:
-            text = self.note
+            lines = [seg([(self.note, HI)], width)]
         elif self.auto:
-            text = "Piloto automático   (a: tomar el control   q: huir)"
+            lines = [seg([("Piloto automático   (a: tomar el control   q: huir)", HI)], width)]
         else:
-            text = self.menu()
-        return out + f"\x1b[2;1H\x1b[2K\x1b[97m{text[:max(0, cols - 1)]}\x1b[0m"
+            lines = self._menu_cells(cols, avail) or [seg([(self.menu(), HI)], width)]
+        return out + put_rows(lines, 2, 1 + avail)
 
 
 # --------------------------------------------------------------------------- main
@@ -1391,6 +1544,7 @@ def main():
     msg, msg_until = "Cargando...", time.time() + 30
     tick = 1 / max(5, args.fps)
     last = time.perf_counter()
+    drawn_rows = 1         # filas de texto que dibujó el cuadro anterior (para borrar lo que sobre)
 
     def flash(text, secs=4):
         nonlocal msg, msg_until
@@ -1479,6 +1633,48 @@ def main():
         t = gym["t"]
         team = " · ".join(f"{p['nombre']} Nv{p['nivel']}" for p in t["equipo"])
         return f"{t['nombre']} ({t['detalle']}): {team}      Enter: pelear   0 volver"
+
+    def gym_block(avail):
+        """Menú de combates en cuadrícula (None si no hay filas libres: se usa `gym_text`)."""
+        if not gyms:
+            return None
+        st = gym["stage"]
+        back = [("0", KEY), (" volver    ", DIM), ("Esc", KEY), (" cierra", DIM)]
+        if st == 0:
+            return grid([("Combates de gimnasio · ¿de qué región?", HI)],
+                        [opt(str(i + 1), r["nombre"]) for i, r in enumerate(gyms)],
+                        [("Esc", KEY), (" cancela", DIM)], cols, avail)
+        region = gyms[gym["r"]]
+        if st == 1:
+            return grid([(region["nombre"], HI)], [opt(str(i + 1), g["nombre"]) for i, g in enumerate(region["grupos"])],
+                        back, cols, avail)
+        if st == 2:
+            title = [(f"{region['nombre']} · {region['grupos'][gym['g']]['nombre']}", HI)]
+            return grid(title, [opt(str(i + 1), t["nombre"]) for i, t in enumerate(gym_trainers())], back, cols, avail, 4)
+        t = gym["t"]
+        return grid([(t["nombre"], WARN), (f"  {t['detalle']} · su equipo:", DIM)],
+                    [[(p["nombre"], HI), (f" Nv{p['nivel']}", DIM)] for p in t["equipo"]],
+                    [("Enter", KEY), (" pelear    ", DIM), ("0", KEY), (" volver", DIM)], cols, avail, 3)
+
+    def vs_block(avail):
+        """Sala de versus en cuadrícula (None si no hay filas libres o la etapa no tiene menú)."""
+        v = vs.view()
+        if not v:
+            return None
+        return grid([(v["title"], WARN if v.get("warn") else HI)], [opt(k, label) for k, label in v["items"]],
+                    [(v["foot"], DIM)], cols, avail, 3)
+
+    def idle_block(avail, talking):
+        """Ayuda de teclas (dos filas agrupadas si hay lugar y ancho; si no, una sola con lo esencial)."""
+        names = ", ".join(p.name for p in pets) or "(vacío)"
+        fights = [opt("b", "batalla"), opt("v", "versus"), opt("g", "gimnasios")]
+        team = [opt("a", "agregar"), opt("c", "cambiar"), opt("x", "sacar"), opt("r", "azar")]
+        more = [opt("i", "info"), opt("h", "mimar"), opt("q", "salir")]
+        width = max(10, cols - 1)
+        if avail >= 2 and cols >= 84 and not talking:
+            return [seg([("Combates  ", DIM)] + flat(fights) + [("      Tus Pokémon: ", DIM), (names, HI)], width),
+                    seg([("Equipo    ", DIM)] + flat(team) + [("      Más: ", DIM)] + flat(more), width)]
+        return [seg(flat(fights + team + more, "  ") + [("   ·  ", DIM), (names, DIM)], width)]
 
     def gym_key(ch):
         """Menú de combates con dígitos: región -> grupo -> entrenador -> Enter. 0 vuelve, Esc cierra."""
@@ -1758,7 +1954,8 @@ def main():
                 else:
                     frame = (render_sixel(scene.visible(), cols, rows, bg, reserve=2) if args.sixel
                              else render(scene.visible(), cols, rows, reserve=2))
-                    w("\x1b[?2026h" + frame + scene.hud(cols) + "\x1b[?2026l")
+                    avail = text_rows_free(scene.pets, rows, args.sixel, 2) - 1
+                    w("\x1b[?2026h" + frame + scene.hud(cols, avail) + "\x1b[?2026l")
                     sys.stdout.flush()
                     time.sleep(max(0, tick - (time.perf_counter() - now)))
                     continue
@@ -1767,27 +1964,39 @@ def main():
             for p in pets:
                 p.update(dt, cols * px_per_col, idle, sleep_after)
 
-            # --- línea de estado
+            # --- filas de texto arriba: los menús usan varias (en cuadrícula) si hay lugar, si no, una sola
+            avail = text_rows_free(pets, rows, args.sixel)
+            talking = any(p.say_until > time.time() for p in pets)
+            block = None
             if gym:
-                status = status_line(gym_text(), cols, True)
+                block = gym_block(avail)
+                status = None if block else status_line(gym_text(), cols, True)
             elif mode:
                 label = f"{prompt_err}  →  corregí y Enter (Esc cancela)" if prompt_err else PROMPTS[mode]
                 if mode == "vsteam" and vs and not prompt_err:
                     label = PROMPTS[mode].format(peer=vs.peer)
                 status = prompt_line(label, buf, cur, cols)
             elif picker:
-                status = status_line(picker.text(cols), cols, True)
+                block = picker.lines(cols, avail)
+                status = None if block else status_line(picker.text(cols), cols, True)
             elif vs:
-                status = status_line(vs.text(), cols, True)
+                block = vs_block(avail)
+                status = None if block else status_line(vs.text(), cols, True)
             elif time.time() < msg_until:
                 status = status_line(msg, cols, True)
             else:
-                lista = ", ".join(p.name for p in pets) or "(vacío)"
-                keys_hint = "v VERSUS  b batalla  g gimnasios  a agregar  c cambiar  x sacar  r azar  i info  h mimar  q salir"
-                status = status_line(f"{keys_hint}   ·  {lista}", cols)
+                block = idle_block(avail, talking)
+            if block:
+                status = put_rows(block, 1, drawn_rows)
+            elif drawn_rows > 1:
+                status += put_rows([], 2, drawn_rows)           # borra lo que dejó un menú más alto
+            drawn_rows = len(block) if block else 1
 
             frame = render_sixel(pets, cols, rows, bg) if args.sixel else render(pets, cols, rows)
-            bub = bubbles(pets, cols, rows, args.sixel, px_per_col)
+            if block and pets and len(block) >= top_row_of(pets, rows, args.sixel) - 1:
+                bub = ""                                    # no hay lugar para el globo sin pisar el menú
+            else:
+                bub = bubbles(pets, cols, rows, args.sixel, px_per_col)
             if had_bubble and not bub:
                 w("\x1b[2J")                         # se fue el globo: limpiar su rastro
             had_bubble = bool(bub)

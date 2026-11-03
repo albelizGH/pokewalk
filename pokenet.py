@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 
 import pokebattle as pb
@@ -33,7 +34,10 @@ TCP_PORT = 5757         # puerto de la sala (si está ocupado se usa otro, y el 
 UDP_PORT = 5758         # puerto donde se anuncian las salas
 MAX_TEAM = 6
 BEACON_EVERY = 1.0      # s entre avisos de la sala
-ROOM_TTL = 4.0          # s sin aviso para que una sala desaparezca de la lista
+ROOM_TTL = 7.0          # s sin verse para que una sala desaparezca de la lista
+SCAN_EVERY = 2.0        # s entre un escaneo de la subred y el siguiente
+PROBE_TIMEOUT = 0.35    # s para que un equipo conteste a la prueba de sala (en una LAN responden en milisegundos)
+PENDING_TTL = 5.0       # s que se espera el primer mensaje de una conexión entrante
 PING_EVERY = 5.0        # s de silencio para mandar un latido
 DEAD_AFTER = 30.0       # s sin recibir nada para dar por perdida la conexión
 MAX_BUF = 1 << 20       # tope de una línea sin terminar
@@ -422,25 +426,67 @@ class RoomHost:
             pass
 
 
+def probe_room(ip, port=TCP_PORT):
+    """¿Hay una sala de pokewalk en ip:port? Devuelve su nombre o None. Es una conexión SALIENTE: el firewall
+    de quien busca no la frena, a diferencia de recibir avisos por broadcast (que Windows bloquea sin permiso)."""
+    try:
+        s = socket.create_connection((ip, port), timeout=PROBE_TIMEOUT)
+    except OSError:
+        return None
+    try:
+        s.settimeout(1.5)
+        s.sendall(b'{"t":"probe"}\n')
+        data = b""
+        while b"\n" not in data and len(data) < 4096:
+            chunk = s.recv(1024)
+            if not chunk:
+                break
+            data += chunk
+        m = json.loads(data.split(b"\n")[0])
+        if m.get("t") == "room" and m.get("v") == PROTO:
+            return _text(m.get("name"), 20) or ip
+    except (OSError, ValueError, AttributeError):
+        pass
+    finally:
+        s.close()
+    return None
+
+
 class RoomFinder:
-    """Escucha los avisos de salas de la red. `rooms()` = las que avisaron hace poco."""
+    """Busca salas de dos maneras a la vez:
+      * escaneo: prueba conectarse al puerto de sala de cada equipo de tu subred (andá lo que andes con el
+        firewall, y no depende del broadcast, que muchas redes y firewalls bloquean);
+      * avisos UDP de las salas, si el firewall deja recibirlos.
+    `rooms()` = las que se vieron hace poco."""
 
     def __init__(self):
-        self.found = {}
+        self.found = {}         # (ip, puerto) -> (nombre, visto, verificado por escaneo)
         self.error = ""
         self.sock = None
         self.stop = threading.Event()
         self._lock = threading.Lock()
+        self.me = set(local_ips())
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(("", UDP_PORT))
             s.settimeout(0.5)
-        except OSError as e:
-            self.error = f"No pude escuchar salas ({e})"
-            return
-        self.sock = s
-        threading.Thread(target=self._listen, daemon=True).start()
+            self.sock = s
+            threading.Thread(target=self._listen, daemon=True).start()
+        except OSError:
+            pass                # sin UDP igual se busca por escaneo
+        threading.Thread(target=self._scan, daemon=True).start()
+
+    def _scan(self):
+        while not self.stop.is_set():
+            nets = dict.fromkeys(".".join(ip.split(".")[:3]) for ip in self.me)
+            targets = [f"{n}.{i}" for n in nets for i in range(1, 255) if f"{n}.{i}" not in self.me]
+            with ThreadPoolExecutor(128) as ex:
+                for ip, name in zip(targets, ex.map(probe_room, targets)):
+                    if name:
+                        with self._lock:
+                            self.found[(ip, TCP_PORT)] = (name, time.time(), True)
+            self.stop.wait(SCAN_EVERY)
 
     def _listen(self):
         while not self.stop.is_set():
@@ -458,13 +504,23 @@ class RoomFinder:
             except (ValueError, KeyError, TypeError, AttributeError):
                 continue
             with self._lock:
-                self.found[(addr[0], port)] = (name, time.time())
+                old = self.found.get((addr[0], port))
+                self.found[(addr[0], port)] = (name, time.time(), bool(old and old[2] and time.time() - old[1] < ROOM_TTL))
 
     def rooms(self):
+        """Salas vistas hace poco. Una sala con varias IPs (varias placas) sale una sola vez, con la IP que
+        se comprobó por escaneo si la hay (las que solo avisaron por UDP pueden ser de una red virtual)."""
         now = time.time()
         with self._lock:
-            live = [(n, ip, p) for (ip, p), (n, t) in self.found.items() if now - t < ROOM_TTL]
-        return [{"name": n, "ip": ip, "port": p} for n, ip, p in sorted(live)]
+            items = list(self.found.items())
+        best = {}
+        for (ip, port), (name, seen, verified) in items:
+            if now - seen >= ROOM_TTL:
+                continue
+            cur = best.get((name, port))
+            if cur is None or (verified and not cur[3]):
+                best[(name, port)] = (ip, port, name, verified)
+        return [{"name": n, "ip": ip, "port": p} for ip, p, n, _ in sorted(best.values(), key=lambda x: (x[2], x[0]))]
 
     def close(self):
         self.stop.set()
@@ -496,6 +552,7 @@ class Versus:
         self._conn = None
         self._fail = ""
         self._fw = None
+        self._pending = []         # conexiones entrantes que todavía no dijeron quiénes son (sala abierta)
         self.noperm = False        # Windows no dio el permiso: puede que el amigo no pueda conectarse
         self._lock = threading.Lock()
         self._hello = False
@@ -540,6 +597,29 @@ class Versus:
             extra = " (¡ya armó el suyo!)" if self.foe else ""
             return f"Tu equipo está listo. Esperando a {self.peer}...{extra}      Esc cancela"
         return "Preparando la batalla..."
+
+    def view(self):
+        """El menú de la etapa actual como datos, para dibujarlo en varias filas: {"title", "items": [(tecla,
+        texto)], "foot", "warn"}. None si la etapa no tiene menú (se usa `text()`)."""
+        st = self.stage
+        if st == "menu":
+            title = "Versus en la red local"
+            if self.noperm:
+                title = "⚠ Sin permiso de Windows (salí y entrá de nuevo y aceptá el aviso) · " + title
+            return {"title": title, "warn": self.noperm, "foot": "Esc cancela",
+                    "items": [("1", "Crear sala"), ("2", "Buscar salas"), ("3", "Conectar por IP")]}
+        if st == "hosting":
+            ips = ", ".join(self.room.ips) if self.room and self.room.ips else "la de esta compu"
+            return {"title": f"Sala «{self.name}» abierta · esperando a un amigo...", "items": [],
+                    "foot": f"Tu amigo la ve en «Buscar salas», o conecta por IP a {ips}      Esc cierra la sala"}
+        if st == "browsing":
+            rooms = self.finder.rooms()[:9] if self.finder else []
+            foot = "i  conectar por IP      0  volver      Esc cancela"
+            if not rooms:
+                return {"title": "Buscando salas en tu red...", "items": [], "foot": foot}
+            return {"title": "Salas en tu red:", "foot": foot,
+                    "items": [(str(i + 1), f"{r['name']} ({r['ip']})") for i, r in enumerate(rooms)]}
+        return None
 
     # --- teclado: devuelve "cancel" | "ip" | None
     def key(self, ch):
@@ -625,11 +705,7 @@ class Versus:
             self.stage, self.noperm = "menu", res == "declined"
             return None
         if self.stage == "hosting":
-            link = self.room.accept()
-            if link:
-                self.room.close()
-                self.room = None
-                self._linked(link)
+            self._triage()
         elif self.stage == "connecting":
             with self._lock:
                 res, self._conn = self._conn, None
@@ -665,6 +741,42 @@ class Versus:
             return ("ready",)
         return None
 
+    def _triage(self):
+        """Conexiones entrantes a la sala: un "probe" es alguien buscando salas (se le contesta el nombre y se
+        corta, la sala sigue abierta); un "hello" es el amigo que de verdad entra."""
+        link = self.room.accept()
+        if link:
+            self._pending.append((link, time.time()))
+        for item in list(self._pending):
+            link, t0 = item
+            for m in link.poll():
+                kind = m.get("t")
+                if kind == "probe":
+                    link.send({"t": "room", "v": PROTO, "name": self.name})
+                    link.close()
+                    self._pending.remove(item)
+                    break
+                if kind == "hello":
+                    link.q.put(m)                       # lo procesa update(), como siempre
+                    self._pending.remove(item)
+                    self.room.close()
+                    self.room = None
+                    self._drop_pending()
+                    self._linked(link)
+                    return
+                if kind == "_closed":
+                    self._pending.remove(item)
+                    break
+            else:
+                if time.time() - t0 > PENDING_TTL:      # conectó y no dijo nada
+                    link.close()
+                    self._pending.remove(item)
+
+    def _drop_pending(self):
+        for link, _ in self._pending:
+            link.close()
+        self._pending = []
+
     def take_link(self):
         """La batalla se queda con la conexión."""
         link, self.link = self.link, None
@@ -677,6 +789,7 @@ class Versus:
             if part:
                 part.close()
         self.room = self.finder = None
+        self._drop_pending()
         if self.link:
             self.link.close("bye")
             self.link = None

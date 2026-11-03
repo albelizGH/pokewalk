@@ -106,9 +106,10 @@ tenés estado); y cambia de Pokémon si el suyo casi no te hace daño y le pegá
 
 Los dos tienen que tener pokewalk (la misma versión) y estar en la misma red WiFi / LAN. No hace falta instalar nada más.
 
-1. Uno aprieta **`v`** y elige **1 Crear sala**. El otro aprieta **`v`** y elige **2 Buscar salas**: la sala aparece sola
-   en la lista (se anuncia por broadcast UDP) y la elige con su número. Si no aparece (algunas redes bloquean el
-   broadcast), **3 / `i` Conectar por IP**: se escribe la IP que muestra el que creó la sala.
+1. Uno aprieta **`v`** y elige **1 Crear sala**. El otro aprieta **`v`** y elige **2 Buscar salas**: pokewalk prueba
+   los equipos de tu red y la sala aparece sola en la lista (también escucha los avisos UDP de las salas). La elige
+   con su número. Si no aparece (por ejemplo en un Wi-Fi que aísla a los equipos entre sí), **3 / `i` Conectar por IP**:
+   se escribe la IP que muestra el que creó la sala.
 2. **Cada uno arma su equipo en la sala**: hasta 6 Pokémon (`pika char`, o `pika:60` para nivel 60; Enter solo = los
    que caminan). Después **elegís los ataques de cada uno** entre todos los que puede usar a su nivel (hasta 4):
 
