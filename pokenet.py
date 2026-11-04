@@ -703,10 +703,12 @@ class Versus:
         if st == "firewall":
             return ("Revisando los permisos de red de Windows... Si aparece un aviso de Windows, aceptalo: "
                     "es para que tu amigo pueda conectarse (una sola vez).      Esc cancela")
-        if st == "menu":
+        if st in ("menu", "lan"):
             warn = "⚠ Sin permiso de Windows (salí y entrá de nuevo y aceptá el aviso) · " if self.noperm else ""
-            return warn + ("Versus en la red local:   1 Crear sala   2 Buscar salas   "
-                           "3 Crear torneo   4 Por internet      Esc cancela")
+            if st == "menu":
+                return warn + "Versus:   1 En tu red   2 Por internet      Esc cancela"
+            return warn + ("En tu red:   1 Crear sala   2 Crear torneo   3 Buscar salas"
+                           "      0 volver   Esc cancela")
         if st == "net":
             return ("Por internet (con un código):   1 Crear sala   2 Crear torneo   3 Unirse con un código"
                     "      0 volver   Esc cancela")
@@ -751,14 +753,18 @@ class Versus:
         """El menú de la etapa actual como datos, para dibujarlo en varias filas: {"title", "items": [(tecla,
         texto)], "foot", "warn"}. None si la etapa no tiene menú (se usa `text()`)."""
         st = self.stage
-        if st == "menu":
-            title = "Versus en la red local"
+        if st in ("menu", "lan"):
+            title = "Versus · ¿dónde juegan?" if st == "menu" else "En tu red (misma casa o mismo Wi-Fi)"
             if self.noperm:
                 title = "⚠ Sin permiso de Windows (salí y entrá de nuevo y aceptá el aviso) · " + title
-            return {"title": title, "warn": self.noperm, "foot": "Esc cancela",
-                    "items": [("1", "Crear sala"), ("2", "Buscar salas (si no aparece, ahí podés escribir la IP)"),
-                              ("3", f"Crear torneo ({MIN_PLAYERS}-{MAX_PLAYERS} jugadores)"),
-                              ("4", "Por internet, con un código (amigos fuera de tu red)")]}
+            if st == "menu":
+                return {"title": title, "warn": self.noperm, "foot": "Esc cancela",
+                        "items": [("1", "En tu red (misma casa o mismo Wi-Fi)"),
+                                  ("2", "Por internet, con un código (amigos fuera de tu red)")]}
+            return {"title": title, "warn": self.noperm, "foot": "0  volver      Esc cancela",
+                    "items": [("1", "Crear sala"),
+                              ("2", f"Crear torneo ({MIN_PLAYERS}-{MAX_PLAYERS} jugadores)"),
+                              ("3", "Buscar salas (si no aparece, ahí podés escribir la IP)")]}
         if st == "net":
             return {"title": "Por internet: sin instalar nada (pasa por un servidor público gratuito)",
                     "foot": "0  volver      Esc cancela",
@@ -776,7 +782,7 @@ class Versus:
         if st == "hosting" and self.relay:
             return {"title": f"Sala por internet · código  {self.room.code}  · {rules_text(self.rules)}", "items": [],
                     "warn": True,
-                    "foot": "Pasale el código a tu amigo: él entra con v → 4 → 3 «Unirse con un código»      "
+                    "foot": "Pasale el código a tu amigo: él entra con v → 2 → 3 «Unirse con un código»      "
                             "Esc cierra la sala"}
         if st == "hosting":
             ips = ", ".join(self.room.ips) if self.room and self.room.ips else "la de esta compu"
@@ -797,12 +803,17 @@ class Versus:
         if ch == "\x1b":
             return "cancel"
         if self.stage == "menu":
-            if ch in ("1", "3"):
-                self.stage, self.tourney = "size", ch == "3"
+            if ch == "1":
+                self.stage = "lan"
             elif ch == "2":
-                self.browse()
-            elif ch == "4":
                 self.stage = "net"
+        elif self.stage == "lan":
+            if ch in ("1", "2"):
+                self.stage, self.tourney = "size", ch == "2"
+            elif ch == "3":
+                self.browse()
+            elif ch == "0":
+                self.stage = "menu"
         elif self.stage == "net":
             if ch in ("1", "2"):
                 self.stage, self.tourney, self.relay = "size", ch == "2", True
@@ -812,7 +823,7 @@ class Versus:
                 self.stage = "menu"
         elif self.stage == "size":
             if ch == "0":
-                self.stage, self.tourney = ("net" if self.relay else "menu"), False
+                self.stage, self.tourney = ("net" if self.relay else "lan"), False
                 self.relay = False
             elif ch.isdigit() and 1 <= int(ch) <= MAX_TEAM:
                 self.size = int(ch)
@@ -828,7 +839,7 @@ class Versus:
                 return "ip"
             if ch == "0":
                 self._stop_finder()
-                self.stage = "menu"
+                self.stage = "lan"
             elif ch.isdigit() and self.finder:
                 rooms = self.finder.rooms()
                 if 1 <= int(ch) <= len(rooms[:9]):
@@ -1311,7 +1322,7 @@ class Tournament(_TourLobby):
     def _foot(self):
         n = len(self.players)
         if self.code:
-            code = f"Código {self.code} (entran con v → 4 → 3 «Unirse con un código»)"
+            code = f"Código {self.code} (entran con v → 2 → 3 «Unirse con un código»)"
             go = f"Enter  empezar (mínimo {MIN_PLAYERS})" if n >= MIN_PLAYERS else f"Faltan {MIN_PLAYERS - n}"
             return f"{code} · {go}      Esc  cancela el torneo"
         if n >= MIN_PLAYERS:

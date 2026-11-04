@@ -65,7 +65,7 @@ El hook envuelve `prompt` sin alterar `$?` ni `$LASTEXITCODE`, así que convive 
 | Tecla | Qué hace |
 |---|---|
 | `b` | **batalla** por equipos (abajo): `pika char` = 1 contra 1, `pika char vs mew snor` = equipos de hasta 6, Enter solo = 3 contra 3 al azar; en la lista (`Tab`), `Tab` escribe el `vs` y lo que sigue es el rival |
-| `v` | **versus contra un amigo** en la misma red (abajo, "Versus contra un amigo"), o un **torneo** de 3 a 8 (abajo, "Torneo"); con **5**, lo mismo **por internet** con un código (abajo, "Jugar por internet") |
+| `v` | **versus contra un amigo** o **torneo** de 3 a 8: **1** en tu red (abajo, "Versus contra un amigo" y "Torneo") o **2** por internet con un código (abajo, "Jugar por internet") |
 | `g` | **combates de gimnasio** (abajo): líderes, Alto Mando y campeón de Kanto y Johto |
 | `i` | **info**: tipo, stats base, altura y peso de un Pokémon (Enter solo = uno que camina) |
 | `h` | **mimar**: escribís a quién (nombre, número o el principio: `pika`; varios con espacio) y se alegra y te dice algo. Enter solo = uno al azar |
@@ -106,9 +106,9 @@ tenés estado); y cambia de Pokémon si el suyo casi no te hace daño y le pegá
 
 Los dos tienen que tener pokewalk (la misma versión) y estar en la misma red WiFi / LAN. No hace falta instalar nada más.
 
-1. Uno aprieta **`v`** y elige **1 Crear sala**, y fija **las reglas de la sala**: de cuántos Pokémon son los equipos
+1. Uno aprieta **`v`** y elige **1 En tu red** → **1 Crear sala**, y fija **las reglas de la sala**: de cuántos Pokémon son los equipos
    (`1`-`6`), el nivel (1-100, Enter solo = 50) y si entran **legendarios** y **míticos** (`1` todos, `2` sin
-   legendarios, `3` sin míticos, `4` sin ninguno de los dos; Enter = todos). El otro aprieta **`v`** y elige **2 Buscar salas**: pokewalk prueba
+   legendarios, `3` sin míticos, `4` sin ninguno de los dos; Enter = todos). El otro aprieta **`v`** y elige **1 En tu red** → **3 Buscar salas**: pokewalk prueba
    los equipos de tu red y la sala aparece sola en la lista, con sus reglas (también escucha los avisos UDP de las
    salas). La elige con su número. Si no aparece (por ejemplo en un Wi-Fi que aísla a los equipos entre sí, una red dividida
    o una sala que abrió en otro puerto), dentro de la búsqueda apretás **`i`** y escribís la IP que muestra el que creó
@@ -149,14 +149,14 @@ cada uno, así que nada impide hacer trampa a propósito.
 Si es la primera vez, el firewall de Windows va a preguntar si dejás a Python usar la red: aceptá en **redes privadas**.
 La sala usa el puerto TCP 5757 y los avisos van por UDP 5758.
 
-### Torneo en la misma red (`v` → 3)
+### Torneo en la misma red (`v` → 1 → 2)
 
 Para jugar entre 3 y 8 en la misma red: **eliminación directa**, una pelea por vez, y todos los que no pelean la miran
 en vivo (el organizador también juega).
 
-1. El organizador aprieta **`v`**, elige **3 Crear torneo** y fija las reglas como en una sala de versus (de cuántos
+1. El organizador aprieta **`v`**, elige **1 En tu red** → **2 Crear torneo** y fija las reglas como en una sala de versus (de cuántos
    Pokémon son los equipos, el nivel y si entran legendarios / míticos).
-2. Los demás aprietan **`v`** → **2 Buscar salas**: el torneo aparece aparte, con cuántos hay
+2. Los demás aprietan **`v`** → **1 En tu red** → **3 Buscar salas**: el torneo aparece aparte, con cuántos hay
    (`Torneo de Ana (192.168.1.5) · 3/8 · 3 Pokémon · nivel 50`). Se elige con su número. También se puede entrar con
    **`i`** dentro de la búsqueda (la IP del organizador): pokewalk se da cuenta solo de que es un torneo.
 3. En la sala todos ven la lista de jugadores y las reglas. Si alguien se va o se le corta la conexión, sale de la lista.
@@ -192,16 +192,16 @@ en vivo (el organizador también juega).
 Todos se conectan solo a la compu del organizador, así que tiene que poder recibir conexiones (el mismo permiso de
 Windows que para crear una sala de versus). Hace falta la misma versión de pokewalk en todas las compus.
 
-### Jugar por internet (sin instalar nada) (`v` → 4)
+### Jugar por internet (sin instalar nada) (`v` → 2)
 
 Para jugar con amigos que **no están en tu red** (cada uno en su casa), versus 1 contra 1 o torneo, sin instalar nada
 más ni tocar el router: los mensajes pasan por un servidor público y gratuito.
 
-1. El que crea aprieta **`v`** → **5 Por internet** → **1 Crear sala** o **2 Crear torneo**, y fija las reglas igual
+1. El que crea aprieta **`v`** → **2 Por internet** → **1 Crear sala** o **2 Crear torneo**, y fija las reglas igual
    que en la red local (tamaño de los equipos, nivel, legendarios / míticos). Al rato (unos segundos: se conecta al
    servidor) aparece **el código de la sala**, por ejemplo **`PIKA-7F3K-92QD`**: se lo pasás a tus amigos por
    WhatsApp o lo que sea.
-2. Los demás aprietan **`v`** → **5 Por internet** → **3 Unirse con un código** y lo escriben. Da igual mayúsculas,
+2. Los demás aprietan **`v`** → **2 Por internet** → **3 Unirse con un código** y lo escriben. Da igual mayúsculas,
    minúsculas, guiones o espacios (`pika7f3k92qd` sirve), y la `O` vale como `0` y la `I` / `L` como `1`. Si el código
    está mal o la sala ya se cerró: `Nadie contestó en la sala ...`. Pokewalk se da cuenta solo de si es un 1 contra 1
    o un torneo.
