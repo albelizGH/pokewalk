@@ -21,11 +21,20 @@ Pokémon gets a small random level handicap for fun.
 
 ## Tasks
 - [x] T1 Ranges in add/set, capped at 10 — route: inline (one file, small)
-- [ ] T2 Room rules (team size + level) in pokenet.py / pokewalk.py — route: delegated writer (2 non-trivial files)
-- [ ] T3 Level handicap ±5 in versus — route: delegated writer (same unit as T2)
+- [x] T2 Room rules (team size + level) in pokenet.py / pokewalk.py — route: delegated writer (2 non-trivial files)
+- [x] T3 Level handicap ±5 in versus — route: delegated writer (same unit as T2)
 
 ## Progress / evidence
 - Prior work committed: 4192673 (regional picker with Tab).
+- T2/T3 design: Versus stage `size` (digits 1-6) -> pokewalk mode `vslevel` (typed level, Enter = 50) ->
+  `Versus.host(size, level)`. Rules `{"size", "level"}` travel in the host's `hello`, the probe reply and the UDP
+  beacon (room list shows them); `pokenet.room_rules` sanitizes and falls back to MAX_TEAM / pb.LEVEL. Received foe
+  teams larger than the room size are rejected. Rematch reuses `Session.rules`. Pure helpers in pokewalk.py:
+  `parse_vs_team`, `room_level`, `handicap_level` (VS_HANDICAP = 5).
+- T2/T3 checks: `py -m py_compile pokewalk.py pokenet.py pokebattle.py` OK; scripted check of parse_vs_team
+  (rejects `pika:60`, rejects more than size, trims walking to size), room_level, handicap range over 5000 samples
+  at levels 1/3/50/98/100 OK; loopback handshake over localhost (host 3 Pokémon nivel 70 -> guest receives same rules,
+  both get ("team",)) OK; oversize foe team rejected OK; probe_room returns the room rules OK.
 
 ## Next step
-T1.
+Parent commits T2/T3; manual two-machine play test still pending.

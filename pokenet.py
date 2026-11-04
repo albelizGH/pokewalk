@@ -61,6 +61,21 @@ def _int(v, lo, hi):
     return max(lo, min(hi, n))
 
 
+def room_rules(raw=None):
+    """Reglas de la sala, saneadas: {"size": 1..MAX_TEAM, "level": 1..100}. Lo que falte o venga roto queda
+    en lo de siempre (equipo de MAX_TEAM, nivel pb.LEVEL), para no caerse con un mensaje incompleto."""
+    raw = raw if isinstance(raw, dict) else {}
+    size = _int(raw["size"], 1, MAX_TEAM) if "size" in raw else MAX_TEAM
+    level = _int(raw["level"], 1, 100) if "level" in raw else pb.LEVEL
+    return {"size": size, "level": level}
+
+
+def rules_text(rules):
+    """"3 Pokémon · nivel 50"."""
+    r = room_rules(rules)
+    return f"{r['size']} Pokémon · nivel {r['level']}"
+
+
 def _side(v):
     if v is None:
         return None
@@ -380,8 +395,9 @@ class RoomHost:
     """Sala abierta: escucha conexiones TCP y avisa por broadcast UDP cada segundo (a la dirección general
     y al broadcast de cada red de esta compu, porque con varias placas / VPN el general sale solo por una)."""
 
-    def __init__(self, name):
+    def __init__(self, name, rules=None):
         self.ips = local_ips()
+        rules = room_rules(rules)
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             srv.bind(("", TCP_PORT))
@@ -390,7 +406,8 @@ class RoomHost:
         srv.listen(1)
         srv.setblocking(False)
         self.srv, self.port = srv, srv.getsockname()[1]
-        self.beacon = json.dumps({"app": "pokewalk", "v": PROTO, "name": name, "port": self.port}).encode()
+        self.beacon = json.dumps({"app": "pokewalk", "v": PROTO, "name": name, "port": self.port,
+                                  "rules": rules}).encode()
         self.stop = threading.Event()
         threading.Thread(target=self._announce, daemon=True).start()
 
@@ -427,7 +444,7 @@ class RoomHost:
 
 
 def probe_room(ip, port=TCP_PORT):
-    """¿Hay una sala de pokewalk en ip:port? Devuelve su nombre o None. Es una conexión SALIENTE: el firewall
+    """¿Hay una sala de pokewalk en ip:port? Devuelve (nombre, reglas) o None. Es una conexión SALIENTE: el firewall
     de quien busca no la frena, a diferencia de recibir avisos por broadcast (que Windows bloquea sin permiso)."""
     try:
         s = socket.create_connection((ip, port), timeout=PROBE_TIMEOUT)
@@ -444,7 +461,7 @@ def probe_room(ip, port=TCP_PORT):
             data += chunk
         m = json.loads(data.split(b"\n")[0])
         if m.get("t") == "room" and m.get("v") == PROTO:
-            return _text(m.get("name"), 20) or ip
+            return _text(m.get("name"), 20) or ip, room_rules(m.get("rules"))
     except (OSError, ValueError, AttributeError):
         pass
     finally:
@@ -460,7 +477,7 @@ class RoomFinder:
     `rooms()` = las que se vieron hace poco."""
 
     def __init__(self):
-        self.found = {}         # (ip, puerto) -> (nombre, visto, verificado por escaneo)
+        self.found = {}         # (ip, puerto) -> (nombre, visto, verificado por escaneo, reglas)
         self.error = ""
         self.sock = None
         self.stop = threading.Event()
@@ -482,10 +499,10 @@ class RoomFinder:
             nets = dict.fromkeys(".".join(ip.split(".")[:3]) for ip in self.me)
             targets = [f"{n}.{i}" for n in nets for i in range(1, 255) if f"{n}.{i}" not in self.me]
             with ThreadPoolExecutor(128) as ex:
-                for ip, name in zip(targets, ex.map(probe_room, targets)):
-                    if name:
+                for ip, res in zip(targets, ex.map(probe_room, targets)):
+                    if res:
                         with self._lock:
-                            self.found[(ip, TCP_PORT)] = (name, time.time(), True)
+                            self.found[(ip, TCP_PORT)] = (res[0], time.time(), True, res[1])
             self.stop.wait(SCAN_EVERY)
 
     def _listen(self):
@@ -501,11 +518,13 @@ class RoomFinder:
                 if m.get("app") != "pokewalk" or m.get("v") != PROTO:
                     continue
                 port, name = _int(m["port"], 1, 65535), _text(m.get("name"), 20) or addr[0]
+                rules = room_rules(m.get("rules"))
             except (ValueError, KeyError, TypeError, AttributeError):
                 continue
             with self._lock:
                 old = self.found.get((addr[0], port))
-                self.found[(addr[0], port)] = (name, time.time(), bool(old and old[2] and time.time() - old[1] < ROOM_TTL))
+                self.found[(addr[0], port)] = (name, time.time(),
+                                               bool(old and old[2] and time.time() - old[1] < ROOM_TTL), rules)
 
     def rooms(self):
         """Salas vistas hace poco. Una sala con varias IPs (varias placas) sale una sola vez, con la IP que
@@ -514,13 +533,14 @@ class RoomFinder:
         with self._lock:
             items = list(self.found.items())
         best = {}
-        for (ip, port), (name, seen, verified) in items:
+        for (ip, port), (name, seen, verified, rules) in items:
             if now - seen >= ROOM_TTL:
                 continue
             cur = best.get((name, port))
             if cur is None or (verified and not cur[3]):
-                best[(name, port)] = (ip, port, name, verified)
-        return [{"name": n, "ip": ip, "port": p} for ip, p, n, _ in sorted(best.values(), key=lambda x: (x[2], x[0]))]
+                best[(name, port)] = (ip, port, name, verified, rules)
+        return [{"name": n, "ip": ip, "port": p, "rules": r}
+                for ip, p, n, _, r in sorted(best.values(), key=lambda x: (x[2], x[0]))]
 
     def close(self):
         self.stop.set()
@@ -534,18 +554,22 @@ class RoomFinder:
 # --------------------------------------------------------------------------- la sala: de conectarse a empezar
 class Versus:
     """Todo lo previo a la batalla. Etapas:
-        menu -> (hosting | browsing | pidiendo IP) -> connecting -> hello -> team (armás tu equipo)
-        -> loading -> waiting (el otro todavía no terminó) -> starting -> la batalla (la arma pokewalk.py).
+        menu -> (size + nivel -> hosting | browsing | pidiendo IP) -> connecting -> hello -> team (armás tu
+        equipo) -> loading -> waiting (el otro todavía no terminó) -> starting -> la batalla (la arma pokewalk.py).
+    Las reglas de la sala (`rules`: tamaño del equipo y nivel) las elige quien la crea y viajan en su "hello":
+    el invitado las tiene antes de armar su equipo.
     pokewalk.py llama a `update()` en cada cuadro y reacciona a lo que devuelve:
         ("team",)        conectados: pedile al jugador su equipo
         ("ready",)       los dos equipos están listos: armar la batalla
         ("error", txt)   se cortó o falló algo: cerrar la sala
     """
 
-    def __init__(self, name, link=None, peer="", role=None, prev=None):
+    def __init__(self, name, link=None, peer="", role=None, prev=None, rules=None):
         """Con `link` (revancha) se retoma la sala con el mismo amigo y la misma conexión, directo en "armá tu
-        equipo". `prev` = (equipo, sprites) de la pelea anterior, para repetirlo con un Enter."""
+        equipo", con las mismas `rules`. `prev` = (equipo, sprites) de la pelea anterior, para repetirlo con un Enter."""
         self.name, self.peer, self.role = name, peer, role
+        self.rules = room_rules(rules)
+        self.size = MAX_TEAM       # lo elige el anfitrión en la etapa "size" (el nivel lo pide pokewalk.py)
         self.stage = "menu"
         self.room = self.finder = self.link = None
         self.prev_team, self.prev_sprites = prev if prev else (None, None)
@@ -580,28 +604,33 @@ class Versus:
         if st == "menu":
             warn = "⚠ Sin permiso de Windows (salí y entrá de nuevo y aceptá el aviso) · " if self.noperm else ""
             return warn + "Versus en la red local:   1 Crear sala   2 Buscar salas   3 Conectar por IP      Esc cancela"
+        if st == "size":
+            return f"Nueva sala: ¿de cuántos Pokémon los equipos?   1-{MAX_TEAM}      0 volver   Esc cancela"
         if st == "hosting":
             where = ", ".join(self.room.ips) if self.room and self.room.ips else "esta compu"
-            return f"Sala «{self.name}» abierta ({where}) · esperando a un amigo...      Esc cierra la sala"
+            return (f"Sala «{self.name}» abierta ({where}) · {rules_text(self.rules)} · esperando a un amigo..."
+                    "      Esc cierra la sala")
         if st == "browsing":
             if self.finder and self.finder.error:
                 return f"{self.finder.error}   ·   i = conectar por IP   0 volver   Esc cancela"
             rooms = self.finder.rooms() if self.finder else []
             if not rooms:
                 return "Buscando salas en la red...   (si no aparece: i = conectar por IP)   0 volver   Esc cancela"
-            return "Salas:  " + "   ".join(f"{i + 1} {r['name']}" for i, r in enumerate(rooms[:9])) + \
+            return "Salas:  " + "   ".join(f"{i + 1} {r['name']} ({rules_text(r['rules'])})"
+                                            for i, r in enumerate(rooms[:9])) + \
                    "      i = por IP   0 volver   Esc cancela"
         if st == "connecting":
             return f"Conectando con {self.target}...      Esc cancela"
         if st == "hello":
             return "Conectado, saludando...      Esc cancela"
         if st == "team":
-            return "Armá tu equipo..."
+            return f"Sala: {rules_text(self.rules)} · armá tu equipo..."
         if st == "loading":
             return "Buscando tu equipo en internet... (la primera vez tarda)"
         if st == "waiting":
             extra = " (¡ya armó el suyo!)" if self.foe else ""
-            return f"Tu equipo está listo. Esperando a {self.peer}...{extra}      Esc cancela"
+            return (f"Sala: {rules_text(self.rules)} · tu equipo está listo. Esperando a {self.peer}...{extra}"
+                    "      Esc cancela")
         return "Preparando la batalla..."
 
     def view(self):
@@ -614,9 +643,13 @@ class Versus:
                 title = "⚠ Sin permiso de Windows (salí y entrá de nuevo y aceptá el aviso) · " + title
             return {"title": title, "warn": self.noperm, "foot": "Esc cancela",
                     "items": [("1", "Crear sala"), ("2", "Buscar salas"), ("3", "Conectar por IP")]}
+        if st == "size":
+            return {"title": "Nueva sala: ¿de cuántos Pokémon los equipos?", "foot": "0  volver      Esc cancela",
+                    "items": [(str(n), f"{n} Pokémon") for n in range(1, MAX_TEAM + 1)]}
         if st == "hosting":
             ips = ", ".join(self.room.ips) if self.room and self.room.ips else "la de esta compu"
-            return {"title": f"Sala «{self.name}» abierta · esperando a un amigo...", "items": [],
+            return {"title": f"Sala «{self.name}» abierta ({rules_text(self.rules)}) · esperando a un amigo...",
+                    "items": [],
                     "foot": f"Tu amigo la ve en «Buscar salas», o conecta por IP a {ips}      Esc cierra la sala"}
         if st == "browsing":
             rooms = self.finder.rooms()[:9] if self.finder else []
@@ -624,20 +657,27 @@ class Versus:
             if not rooms:
                 return {"title": "Buscando salas en tu red...", "items": [], "foot": foot}
             return {"title": "Salas en tu red:", "foot": foot,
-                    "items": [(str(i + 1), f"{r['name']} ({r['ip']})") for i, r in enumerate(rooms)]}
+                    "items": [(str(i + 1), f"{r['name']} ({r['ip']}) · {rules_text(r['rules'])}")
+                              for i, r in enumerate(rooms)]}
         return None
 
-    # --- teclado: devuelve "cancel" | "ip" | None
+    # --- teclado: devuelve "cancel" | "ip" | "level" (pedile al anfitrión el nivel de la sala) | None
     def key(self, ch):
         if ch == "\x1b":
             return "cancel"
         if self.stage == "menu":
             if ch == "1":
-                self.host()
+                self.stage = "size"
             elif ch == "2":
                 self.browse()
             elif ch in ("3", "i", "I"):
                 return "ip"
+        elif self.stage == "size":
+            if ch == "0":
+                self.stage = "menu"
+            elif ch.isdigit() and 1 <= int(ch) <= MAX_TEAM:
+                self.size = int(ch)
+                return "level"
         elif self.stage == "browsing":
             if ch in ("i", "I"):
                 return "ip"
@@ -652,9 +692,11 @@ class Versus:
         return None
 
     # --- pasos
-    def host(self):
+    def host(self, size=MAX_TEAM, level=pb.LEVEL):
+        """Abre la sala con estas reglas (equipos de hasta `size`, todos al nivel `level` ± el handicap)."""
+        self.rules = room_rules({"size": size, "level": level})
         try:
-            self.room = RoomHost(self.name)
+            self.room = RoomHost(self.name, self.rules)
         except OSError as e:
             self._fail = f"No pude abrir la sala: {e}"
             return
@@ -690,7 +732,10 @@ class Versus:
 
     def _linked(self, link):
         self.link, self.stage = link, "hello"
-        link.send({"t": "hello", "v": PROTO, "name": self.name})
+        hello = {"t": "hello", "v": PROTO, "name": self.name}
+        if self.role == "host":                       # las reglas son de quien creó la sala
+            hello["rules"] = self.rules
+        link.send(hello)
 
     def set_team(self, fighters, sprites):
         """Tu equipo ya está armado: se lo mando al otro."""
@@ -732,11 +777,16 @@ class Versus:
                 if m.get("v") != PROTO:
                     return ("error", "El otro pokewalk es de otra versión: actualicen los dos.")
                 self.peer, self._hello = _text(m.get("name"), 20) or "Rival", True
+                if self.role != "host":                 # el invitado juega con las reglas de la sala
+                    self.rules = room_rules(m.get("rules"))
                 if self.stage == "hello":
                     self.stage, event = "team", ("team",)
             elif t == "team":
                 try:
-                    self.foe = team_from_wire(m["fighters"])
+                    foe = team_from_wire(m["fighters"])
+                    if len(m["fighters"]) > self.rules["size"]:
+                        raise ValueError("más Pokémon que los de la sala")
+                    self.foe = foe
                 except (KeyError, TypeError, ValueError, AttributeError):
                     return ("error", f"{who} mandó un equipo inválido.")
             elif t == "bye":
@@ -761,7 +811,7 @@ class Versus:
             for m in link.poll():
                 kind = m.get("t")
                 if kind == "probe":
-                    link.send({"t": "room", "v": PROTO, "name": self.name})
+                    link.send({"t": "room", "v": PROTO, "name": self.name, "rules": self.rules})
                     link.close()
                     self._pending.remove(item)
                     break
@@ -811,6 +861,7 @@ class Session:
     y `close()` al salir."""
 
     role = None                 # "host" | "guest"
+    rules = None                # reglas de la sala (las pone pokewalk.py), para la revancha
 
     def __init__(self, battle, link, peer):
         self.b, self.link, self.peer = battle, link, peer

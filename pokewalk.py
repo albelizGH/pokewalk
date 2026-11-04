@@ -707,8 +707,9 @@ PROMPTS = {
     "pet": "Mimar a (nombre, número o principio; Enter solo = uno al azar)",
     "info": "Info de (nombre, número o principio; Enter solo = uno que camina;  Tab = lista por región)",
     "vsip": "IP del amigo (ej. 192.168.1.20; Esc vuelve)",
-    "vsteam": "Conectado con {peer}. Tu equipo (hasta 6; pika:60 = nivel 60; Enter solo = los que caminan;  Tab = lista)",
-    "vsteam_again": "Revancha con {peer}. Enter solo = el mismo equipo y ataques de recién; o armá otro (pika:60 char;  Tab = lista)",
+    "vslevel": "Nivel de la sala (1-100; cada Pokémon queda ±5 al azar; Enter solo = 50;  Esc vuelve)",
+    "vsteam": "Conectado con {peer} · Sala: {rules}. Tu equipo (hasta {size}, solo nombres; Enter solo = los que caminan;  Tab = lista)",
+    "vsteam_again": "Revancha con {peer} · Sala: {rules}. Enter solo = el mismo equipo y ataques de recién; o armá otro (hasta {size};  Tab = lista)",
 }
 DEX_MODES = ("add", "set", "battle", "info", "vsteam")   # prompts donde Tab abre la lista por región
 
@@ -902,21 +903,45 @@ def prepare_gym_battle(trainer, mine, loader, jobs):
         jobs.put(("gerror", f"No pude preparar el combate: {e}", 6))
 
 
-def load_my_team(parts, loader, jobs, walking):
-    """Hilo (versus): arma tu equipo. Cada término es `nombre` o `nombre:nivel` (nivel 1-100, por defecto 50);
-    sin nada, los que caminan (o 3 al azar)."""
+VS_HANDICAP = 5     # ± niveles al azar en el versus: a nivel 50 son ~10% de stats (se nota, pero no decide)
+
+
+def parse_vs_team(parts, walking, size):
+    """Versus: los nombres de tu equipo según la sala (nunca más de `size`). Solo nombres o números: el nivel lo
+    fija la sala, así que `pika:60` es un error. Sin nada, los que caminan (hasta `size`); si no camina ninguno,
+    `size` al azar. ValueError con un texto para mostrar si algo no va."""
+    for term in parts:
+        if ":" in term:
+            name = term.partition(":")[0] or "pika"
+            raise ValueError(f"En el versus el nivel lo fija la sala: escribí solo el nombre ({name})")
+    if len(parts) > size:
+        raise ValueError(f"En esta sala los equipos son de hasta {size} Pokémon (escribiste {len(parts)})")
+    names = list(parts) or list(walking)[:size]
+    return names or [str(random.randint(1, 493)) for _ in range(size)]
+
+
+def room_level(text):
+    """Nivel que escribió el anfitrión para la sala: vacío = pb.LEVEL; None si no es un número de 1 a 100."""
+    text = text.strip()
+    if not text:
+        return pb.LEVEL
     try:
-        specs = []
-        for term in (parts or list(walking)[:pn.MAX_TEAM]):
-            name, _, lvl = term.partition(":")
-            try:
-                level = max(1, min(100, int(lvl))) if lvl else pb.LEVEL
-            except ValueError:
-                raise ValueError(f"nivel inválido: {term}") from None
-            specs.append((name, level))
-        if len(specs) > pn.MAX_TEAM:
-            raise ValueError(f"hasta {pn.MAX_TEAM} Pokémon por equipo")
-        specs = specs or [(str(random.randint(1, 493)), pb.LEVEL) for _ in range(3)]
+        level = int(text)
+    except ValueError:
+        return None
+    return level if 1 <= level <= 100 else None
+
+
+def handicap_level(level):
+    """Nivel de un Pokémon del versus: el de la sala ± VS_HANDICAP al azar, entre 1 y 100."""
+    return max(1, min(100, level + random.randint(-VS_HANDICAP, VS_HANDICAP)))
+
+
+def load_my_team(names, loader, jobs, walking, level=pb.LEVEL):
+    """Hilo (versus): arma tu equipo con `names` (ya validados con parse_vs_team); cada uno al nivel de la sala
+    con su handicap."""
+    try:
+        specs = [(name, handicap_level(level)) for name in names]
         def build(spec):
             dex, key = resolve(expand_name(spec[0], walking))
             f, pool = pb.load_fighter(fetch, dex, key, spec[1], with_pool=True)
@@ -1042,7 +1067,9 @@ def prepare_versus(vs, loader, jobs):
         if link is None:                                    # cancelaron mientras tanto
             return
         session = (pn.HostSession if vs.role == "host" else pn.GuestSession)(battle, link, vs.peer)
-        intro = [f"¡Versus! {vs.name} contra {vs.peer}", f"{len(vs.my)} contra {len(vs.foe)}"]
+        session.rules = vs.rules                            # la revancha sigue con las mismas reglas
+        intro = [f"¡Versus! {vs.name} contra {vs.peer}   (sala: {pn.rules_text(vs.rules)} ±{VS_HANDICAP})",
+                 f"{len(vs.my)} contra {len(vs.foe)} · Tu equipo: " + " · ".join(f"{f.name} Nv{f.level}" for f in vs.my)]
         jobs.put(("vsbattle", battle, [vs.my_sprites, foe_sprites], intro, session))
     except Exception as e:
         jobs.put(("vsfatal", f"No pude preparar la batalla: {e}", 6))
@@ -1867,7 +1894,7 @@ def main():
         if vs:
             vs.close()
         vs = picker = None
-        if mode in ("vsteam", "vsip"):
+        if mode in ("vsteam", "vsip", "vslevel"):
             mode, buf = None, ""
         if text:
             flash(text, secs)
@@ -1891,7 +1918,7 @@ def main():
             # los dos la pidieron: de vuelta a la sala con el mismo amigo y la misma conexión (sin IPs ni búsqueda).
             # El equipo de recién se puede repetir con un Enter (copias nuevas, con todo el HP y los PP).
             prev = ([pn.fighter_from_wire(pn.fighter_to_wire(f)) for f in scene.b.teams[0]], list(scene.sprites[0]))
-            vs = pn.Versus(pn.player_name(), sess.link, sess.peer, sess.role, prev)
+            vs = pn.Versus(pn.player_name(), sess.link, sess.peer, sess.role, prev, sess.rules)   # mismas reglas
             flash(f"¡Revancha con {sess.peer}!", 3)
         else:
             if sess:
@@ -1999,6 +2026,8 @@ def main():
                         close_vs("Saliste de la sala", 2)
                     elif act == "ip":
                         mode, buf, cur, prompt_err = "vsip", "", 0, ""
+                    elif act == "level":
+                        mode, buf, cur, prompt_err = "vslevel", "", 0, ""
                     continue
                 if gym:
                     gym_key(ch)
@@ -2039,10 +2068,23 @@ def main():
                                 vs.set_team(vs.prev_team, vs.prev_sprites)
                                 flash(f"Mismo equipo y ataques. Esperando a {vs.peer}...", 4)
                             elif vs:
+                                walking = [p.name for p in pets]
+                                try:
+                                    names = parse_vs_team(parts, walking, vs.rules["size"])
+                                except ValueError as e:             # se queda en el prompt para corregir
+                                    prompt_err = str(e)
+                                    continue
                                 vs.stage = "loading"
                                 flash("Buscando tu equipo en internet... (la primera vez tarda)", 90)
                                 threading.Thread(target=load_my_team, daemon=True,
-                                                 args=(parts, loader, jobs, [p.name for p in pets])).start()
+                                                 args=(names, loader, jobs, walking, vs.rules["level"])).start()
+                        elif mode == "vslevel":
+                            level = room_level(buf)
+                            if level is None:
+                                prompt_err = "El nivel de la sala va de 1 a 100"
+                                continue
+                            if vs:
+                                vs.host(vs.size, level)
                         elif mode == "vsip":
                             vs_connect(buf)
                         elif parts:
@@ -2138,7 +2180,8 @@ def main():
             elif mode:
                 label = f"{prompt_err}  →  corregí y Enter (Esc cancela)" if prompt_err else PROMPTS[mode]
                 if mode == "vsteam" and vs and not prompt_err:
-                    label = PROMPTS["vsteam_again" if vs.prev_team else "vsteam"].format(peer=vs.peer)
+                    label = PROMPTS["vsteam_again" if vs.prev_team else "vsteam"].format(
+                        peer=vs.peer, rules=pn.rules_text(vs.rules), size=vs.rules["size"])
                 status = prompt_line(label, buf, cur, cols)
             elif picker:
                 block = picker.lines(cols, avail)

@@ -106,12 +106,17 @@ tenés estado); y cambia de Pokémon si el suyo casi no te hace daño y le pegá
 
 Los dos tienen que tener pokewalk (la misma versión) y estar en la misma red WiFi / LAN. No hace falta instalar nada más.
 
-1. Uno aprieta **`v`** y elige **1 Crear sala**. El otro aprieta **`v`** y elige **2 Buscar salas**: pokewalk prueba
-   los equipos de tu red y la sala aparece sola en la lista (también escucha los avisos UDP de las salas). La elige
-   con su número. Si no aparece (por ejemplo en un Wi-Fi que aísla a los equipos entre sí), **3 / `i` Conectar por IP**:
-   se escribe la IP que muestra el que creó la sala.
-2. **Cada uno arma su equipo en la sala**: hasta 6 Pokémon (`pika char`, o `pika:60` para nivel 60; Enter solo = los
-   que caminan). Después **elegís los ataques de cada uno** entre todos los que puede usar a su nivel (hasta 4):
+1. Uno aprieta **`v`** y elige **1 Crear sala**, y fija **las reglas de la sala**: de cuántos Pokémon son los equipos
+   (`1`-`6`) y el nivel (1-100, Enter solo = 50). El otro aprieta **`v`** y elige **2 Buscar salas**: pokewalk prueba
+   los equipos de tu red y la sala aparece sola en la lista, con sus reglas (también escucha los avisos UDP de las
+   salas). La elige con su número. Si no aparece (por ejemplo en un Wi-Fi que aísla a los equipos entre sí), **3 / `i`
+   Conectar por IP**: se escribe la IP que muestra el que creó la sala. Al entrar, los dos ven las reglas
+   (`Sala: 3 Pokémon · nivel 50`).
+2. **Cada uno arma su equipo en la sala**: hasta el tamaño de la sala, solo nombres o números (`pika char`; el nivel lo
+   fija la sala, así que `pika:60` da error; Enter solo = los que caminan, hasta el tamaño de la sala). **Handicap**:
+   cada Pokémon queda al nivel de la sala ±5 al azar (entre 1 y 100). A nivel 50, ±5 es ~10% de stats: se nota, pero
+   no decide la pelea (con ±10 podría ser 40 contra 60, ~50% más). La revancha sigue con las mismas reglas.
+   Después **elegís los ataques de cada uno** entre todos los que puede usar a su nivel (hasta 4):
 
    | Tecla | Qué hace |
    |---|---|
