@@ -913,13 +913,30 @@ def room_block(v, cols, avail):
         return None
     items = [[(it[0], KEY), (" " + it[1], WARN)] if len(it) > 2 and it[2] else opt(it[0], it[1])
              for it in v["items"]]                     # (tecla, texto[, resaltado]): la pelea en curso del cuadro
-    title = [(v["title"], WARN if v.get("warn") else HI)]
+    title = [(v["title"], BAD if v.get("bad") else WARN if v.get("warn") else HI)]
     if v.get("code"):                                  # por internet: el código primero y aparte, para dictarlo
         title = [("Código ", HI), (f" {v['code']} ", CODE), ("  · ", DIM)] + title
     out = grid(title, items, hint_parts(v["foot"]), cols, avail, 3)
     if out and v.get("code") and v["code"] not in out[0]:
         return None                     # el título (con el código) no entró: la línea compacta, que empieza con él
     return out
+
+
+def abandon_rows(cols, avail, left=None):
+    """La pregunta antes de abandonar la pelea del torneo desde el equipo o los ataques (Esc sin querer = quedar
+    afuera), con los segundos que le quedan al equipo (`left`): el reloj sigue corriendo mientras preguntás."""
+    width = max(10, cols - 1)
+    ask = [("¿Abandonar? Perdés esta pelea y quedás afuera del torneo.", BAD)]
+    keys = [("Esc", KEY), (" sí, abandonar   ", WARN), ("cualquier otra tecla: no", DIM)]
+    if left is not None:
+        keys += [("   ", ""), (f"quedan {left} s", clock_style(left))]
+    if avail >= 2:
+        return [seg(ask, width), seg(keys, width)]
+    one = ask + [("   ", "")] + keys
+    if plen(one) > width:                             # una fila angosta: la pregunta corta, que entren las teclas
+        one = [("¿Abandonar la pelea?", BAD), ("  ", ""), ("Esc", KEY), (" sí   ", WARN), ("otra tecla: no", DIM)] \
+            + keys[3:]
+    return [seg(one, width)]
 
 
 def put_rows(lines, start=1, clear_to=0):
@@ -938,15 +955,18 @@ def text_rows_free(pets, rows, sixel, reserve=1):
 
 # --------------------------------------------------------------------------- configuración (tecla o)
 class SettingsMenu:
-    """Configuración: `1`-`4` eligen la opción y `+` / `-` (o `←` / `→`) cambian su valor, que queda guardado en
-    config.json. La escala y el sueño los aplica el juego al toque (`key` devuelve ("scale", x) / ("sleep_after",
-    minutos)); la letra y el alto del panel se escriben en el settings.json de Windows Terminal."""
+    """Configuración: `1`-`5` eligen la opción y `+` / `-` (o `←` / `→`) cambian su valor, que queda guardado en
+    config.json. La escala, el sueño y la velocidad de los mensajes de batalla los aplica el juego al toque (`key`
+    devuelve ("scale", x) / ("sleep_after", minutos) / ("msg_speed", 0-2)); la letra y el alto del panel se escriben
+    en el settings.json de Windows Terminal."""
     OPTS = (    # (clave, nombre, nombre corto, cuándo se aplica, valores que ofrece + / -, valor si no se sabe)
         ("scale", "Escala de los Pokémon", "Escala", "se ve ya (en batalla, desde la próxima)", pc.SCALES, 2.0),
         ("font_size", "Tamaño de letra", "Letra", "se aplica ya (también agranda o achica a los Pokémon)",
          pc.FONT_SIZES, pc.FONT_DEFAULT),
         ("panel", "Alto del panel", "Alto", "se aplica la próxima vez que abras el panel", pc.PANELS, 0.22),
         ("sleep_after", "Se duermen después de", "Dormir", "se aplica ya", pc.SLEEPS, 5.0),
+        ("msg_speed", "Velocidad de mensajes", "Velocidad",
+         "se aplica ya (Enter pasa cada mensaje)", pc.MSG_SPEEDS, pc.MSG_SPEED_DEFAULT),
     )
     IN_WT = ("font_size", "panel")         # viven en el settings.json de Windows Terminal
 
@@ -955,7 +975,7 @@ class SettingsMenu:
         settings.json de Windows Terminal (si no se puede, se avisa y lo demás sigue andando)."""
         self.config_path, self.settings_path = config_path, settings_path
         self.vals = {"scale": values.get("scale"), "sleep_after": values.get("sleep_after"),
-                     "font_size": None, "panel": None}
+                     "msg_speed": values.get("msg_speed", pc.MSG_SPEED_DEFAULT), "font_size": None, "panel": None}
         self.sel, self.note, self.wt_error = 0, None, None
         try:
             self.vals["font_size"], self.vals["panel"] = pc.wt_values(settings_path)
@@ -970,13 +990,15 @@ class SettingsMenu:
             return f"{round(v * 100)}%"
         if k == "sleep_after":
             return "nunca" if v == 0 else f"{pc.fmt_num(v)} min"
+        if k == "msg_speed":
+            return pc.MSG_SPEED_NAMES[int(v)] if 0 <= v < len(pc.MSG_SPEED_NAMES) else "?"
         return pc.fmt_num(v)
 
     def key(self, ch):
         """None | "close" | (clave, valor nuevo) cuando el juego tiene que aplicarlo."""
         if ch in ("\x1b", "\r", "\n", "0", "o", "O"):
             return "close"
-        if len(ch) == 1 and ch in "1234":
+        if len(ch) == 1 and ch in "12345":
             self.sel, self.note = int(ch) - 1, None
             return None
         delta = 1 if ch in ("+", "=", K_RIGHT) else -1 if ch in ("-", "_", K_LEFT) else 0
@@ -1025,12 +1047,13 @@ class SettingsMenu:
             return [(f"{NO_MARK} {self.wt_error}", BAD)]
         return [((name if full else short) + ": " + when, DIM)]
 
-    HINTS = [("1", KEY), ("-", DIM), ("4", KEY), (" elegí   ", DIM), ("+", KEY), (" ", ""), ("-", KEY), (" cambian   ", DIM),
+    HINTS = [("1", KEY), ("-", DIM), ("5", KEY), (" elegí   ", DIM), ("+", KEY), (" ", ""), ("-", KEY), (" cambian   ", DIM),
              ("Esc", KEY), (" listo", DIM)]
 
     def lines(self, cols, avail):
         """Las filas del menú para `avail` filas libres: título, opciones en 2 columnas y pie si entran; si no, las
-        opciones en una fila; y si hay una sola, una línea con la opción elegida y las teclas."""
+        opciones en una fila (si entran; si no, la elegida con las teclas y el aviso abajo); y si hay una sola, una
+        línea con la opción elegida y las teclas."""
         width = max(10, cols - 1)
         items = [self._item(i) for i in range(len(self.OPTS))]
         title = [("Configuración", HI), ("   ", "")] + self.HINTS
@@ -1041,9 +1064,12 @@ class SettingsMenu:
         row = flat([self._item(i, True) for i in range(len(self.OPTS))], "  ")
         if avail >= 2 and plen(row) <= width:          # los números ya se ven arriba: primero + - y Esc, después el aviso
             return [seg(row, width), seg(self.HINTS[4:] + [("   ", "")] + self._note(False), width)]
-        keys = [("1", KEY), ("-", DIM), ("4", KEY), (" ", ""), ("+", KEY), (" ", ""), ("-", KEY), (" ", ""), ("Esc", KEY)]
-        return [seg([("Config ", HI)] + self._item(self.sel, True) + [("  ", "")] + keys + [("  ", "")]
-                     + self._note(False), width)]
+        keys = [("1", KEY), ("-", DIM), ("5", KEY), (" ", ""), ("+", KEY), (" ", ""), ("-", KEY), (" ", ""), ("Esc", KEY)]
+        one = [("Config ", HI)] + self._item(self.sel, True) + [("  ", "")] + keys
+        if avail >= 2:                                 # las 5 no entran en una fila: la elegida y, abajo, el aviso
+            note = self._note() if plen(self._note()) <= width else self._note(False)
+            return [seg(one, width), seg(note, width)]
+        return [seg(one + [("  ", "")] + self._note(False), width)]
 
 
 # --------------------------------------------------------------------------- batalla
@@ -1128,7 +1154,7 @@ def prepare_gym_battle(trainer, mine, loader, jobs):
             [list(zip(mine, mine_levels)), [(str(p["dex"]), p["nivel"]) for p in foes]], loader, mine)
         intro = [f"¡{trainer['nombre']} quiere combatir!   (nivel medio del rival: {avg})",
                  "Tu equipo: " + " · ".join(f"{f.name} Nv{f.level}" for f in battle.teams[0])]
-        jobs.put(("battle", battle, sprites, intro))
+        jobs.put(("battle", battle, sprites, intro, "gym"))
     except Exception as e:
         jobs.put(("gerror", f"No pude preparar el combate: {e}", 6))
 
@@ -1845,12 +1871,19 @@ class BattleScene:
     (Luchar / Pokémon / Huir, sin Mochila). `a` alterna piloto automático.
     Cada ataque usa las animaciones de PMD del Pokémon (Attack / Shoot / Charge, Hurt, Faint, Sleep) y,
     si tiene sentido, un proyectil y un destello del color del tipo.
-    Con `watch` = (jugador izq., jugador der.) solo se mira (espectador del torneo): sin menús, con el registro."""
+    Con `watch` = (jugador izq., jugador der.) solo se mira (espectador del torneo): sin menús, con el registro.
+    Cada mensaje dura según `speed` (la velocidad de los mensajes, tecla o; ver pokeconfig.msg_secs) y Enter / espacio
+    pasa al siguiente. Huir (`q` / `3`) pregunta primero: `q` o `s` confirma, cualquier otra tecla sigue peleando.
+    `kind` = "gym" en los combates de gimnasio (cambia el texto de la pregunta)."""
+    speed = pc.MSG_SPEED_DEFAULT        # la cambia el juego (config.json, tecla o): vale desde el próximo mensaje
+    SKIP_GUARD = 0.6                    # s después del final en los que Enter no sale (venías pasando mensajes)
 
-    def __init__(self, battle, sprites, ppc, intro=None, net=None, watch=None):
+    def __init__(self, battle, sprites, ppc, intro=None, net=None, watch=None, kind=None):
         self.b, self.sprites, self.ppc = battle, sprites, ppc     # sprites[lado][índice en el equipo]
         self.net = net          # pokenet.Session si el rival es un amigo en red (si no, lo maneja la computadora)
-        self.watch = watch
+        self.watch, self.kind = watch, kind
+        self.confirm = False    # apretaste huir: falta confirmar
+        self.skipped = False    # pasaste mensajes con Enter en esta tanda (el Enter siguiente no saca del final)
         self.log = []           # lo último que pasó (lo ve el espectador)
         self.queued = []        # turnos que llegaron por la red y esperan su turno para animarse
         self.active = [0, 0]
@@ -1900,7 +1933,7 @@ class BattleScene:
 
     # --- turnos
     def _start(self, steps):
-        self.phase, self.steps, self.step_i = "play", steps, 0
+        self.phase, self.steps, self.step_i, self.skipped = "play", steps, 0, False
         self._begin()
 
     def _begin(self):
@@ -1909,7 +1942,7 @@ class BattleScene:
         self.log = (self.log + [self.msg])[-8:]
         self.fx, self.lunge = [], False
         self.hit_t = 0.25 if st.atk is not None else 0.0     # cuándo cae el daño dentro del paso
-        self.dur_eff = st.dur
+        self.dur_eff = pc.msg_secs(self.msg, self.speed, st.dur)     # lo que tarda en leerse (y la animación, abajo)
         if st.faint is not None:
             pet = self.pets[st.faint]
             if "f" in pet.s.durs:                            # se cae y queda tirado hasta que lo reemplacen
@@ -1941,7 +1974,7 @@ class BattleScene:
         else:
             self.hit_t = 0.5 * d
         self.lunge = bool(mv.power) and (not ranged or code is None)
-        self.dur_eff = max(st.dur, self.hit_t + 0.6, d + 0.2)
+        self.dur_eff = max(self.dur_eff, self.hit_t + 0.6, d + 0.2)
         color = TYPE_COLORS.get(mv.type, (255, 255, 255))
         size = max(8, spr.h // 4)
         if ranged:
@@ -1974,7 +2007,7 @@ class BattleScene:
                 self.queued.append(ev[1])
             elif ev[0] == "end" and self.phase != "over":      # el otro se fue o se cortó la conexión
                 self.queued.clear()
-                self.phase, self.over_t = "over", 0.0
+                self.phase, self.over_t, self.confirm = "over", 0.0, False
                 self.over_who, self.rematch_ok = ev[1], False
                 self.msg = self._over_msg()
             elif ev[0] == "peer_rematch":
@@ -2008,7 +2041,7 @@ class BattleScene:
         if self.queued:                                    # ya llegó otro turno (el estado va adelantado): animarlo
             self.phase, self.forced = "wait", False
         elif b.over:
-            self.phase, self.over_t = "over", 0.0
+            self.phase, self.over_t, self.confirm = "over", 0.0, False
             if self.watch:
                 self.over_who = "¡Empate!" if b.winner is None else f"¡Ganó {self.watch[b.winner]}!"
             else:
@@ -2038,6 +2071,23 @@ class BattleScene:
             else:
                 self._finish()
 
+    def _skip(self):
+        """Enter / espacio mientras se anima: pasa al mensaje siguiente (lo que hacía este paso se aplica igual)."""
+        self.skipped = True
+        self.step_t = max(self.step_t, self.dur_eff)
+        self._play(0.0)
+
+    def flee_question(self, short=False):
+        """La pregunta antes de huir: qué se pierde según contra quién peleás (`short`: para una fila angosta)."""
+        if isinstance(self.net, pn.MatchSession):
+            return "¿Huir y quedar afuera?" if short else \
+                "¿Huir? Vas a perder la pelea y quedás afuera del torneo."
+        if self.net:
+            return "¿Huir y perder la pelea?" if short else f"¿Huir? Vas a perder la pelea contra {self.net.peer}."
+        if self.kind == "gym":
+            return "¿Abandonar el combate?" if short else "¿Huir? Vas a abandonar el combate de gimnasio."
+        return "¿Huir?" if short else "¿Huir? Vas a terminar la batalla."
+
     def _tell(self, text):
         self.note, self.note_t = text, 1.8
 
@@ -2050,11 +2100,20 @@ class BattleScene:
                 self.asked = True                      # los dos tienen que pedirla para volver a la sala
                 self.net.rematch()
                 return None
+            if ch in ("\r", "\n", " ") and self.skipped and self.over_t < self.SKIP_GUARD:
+                return None                            # venías pasando mensajes: que se vea quién ganó
             return "done" if ch in ("\r", "\n", " ", "\x1b") or c == "q" else None
+        if self.confirm:                               # ¿huir? q / s sí; cualquier otra tecla vuelve a donde estabas
+            self.confirm = False
+            return "flee" if c in ("q", "s") else None
+        if self.phase == "play" and ch in ("\r", "\n", " "):
+            self._skip()                               # Enter / espacio: el mensaje siguiente
+            return None
         if self.watch:                                     # solo mirás: no hay nada que elegir
             return None
         if c == "q":
-            return "flee"
+            self.confirm = True                        # un q sin querer no te hace perder: pregunta primero
+            return None
         if c == "a":
             if self.net:
                 self._tell("No hay piloto automático contra un amigo")
@@ -2073,7 +2132,7 @@ class BattleScene:
                 else:
                     self._tell("¡No tenés más Pokémon para cambiar!")
             elif c == "3":
-                return "flee"
+                self.confirm = True
         elif self.phase == "fight":
             if back:
                 self.phase = "main"
@@ -2253,6 +2312,21 @@ class BattleScene:
             return grid(title, items, None if self.forced else back, cols, avail, 3)
         return None
 
+    def _confirm_lines(self, width, avail, clock, tick, left):
+        """La pregunta de huir: en rojo, con las teclas; debajo (si hay lugar) el reloj del torneo, que sigue
+        corriendo (`left`: sus segundos, para la versión de una fila), o el mensaje que se está animando."""
+        ask = [(self.flee_question(), BAD)]
+        keys = [("q", KEY), (" sí, huir   ", WARN), ("Esc", KEY), (" / cualquier otra tecla: no", DIM)]
+        extra = [(clock, tick)] if clock else [(self.msg, HI)] if self.phase == "play" else None
+        if avail >= 3 or (avail == 2 and not extra):
+            return [seg(ask, width), seg(keys, width)] + ([seg(extra, width)] if extra else [])
+        keys = [("q", KEY), (" sí, huir   ", WARN), ("otra tecla: no", DIM)]
+        secs = [(f"{max(0, left)} s  ", tick)] if clock and left is not None and avail < 2 else []
+        one = secs + ask + [("   ", "")] + keys                  # una fila: el reloj corto adelante ("9 s")
+        if plen(one) > width:
+            one = secs + [(self.flee_question(True), BAD), ("  ", "")] + keys
+        return [seg(one, width), seg(extra, width)] if avail == 2 else [seg(one, width)]
+
     def hud(self, cols, avail=1):
         """Fila 1: barras de HP, estado y equipo (vos a la izquierda, rival a la derecha). Debajo, hasta `avail`
         filas: el mensaje o el menú."""
@@ -2263,7 +2337,8 @@ class BattleScene:
         deciding = self.phase == "wait" if self.watch else self.phase in ("main", "fight", "switch")
         clock = clock() if clock and deciding else None    # torneo: el reloj del árbitro (últimos segundos)
         until = getattr(self.net, "deadline", None)
-        tick = clock_style(math.ceil(until - time.time()) if until else None)     # rojo en los últimos 5 s
+        left = math.ceil(until - time.time()) if until else None
+        tick = clock_style(left)                           # rojo en los últimos 5 s
         if self.watch:                                     # mirando: quién pelea y el registro de la pelea
             a, b = self.watch
             now = self.msg if self.phase in ("play", "over") else "eligiendo..." + (f"   ({clock})" if clock else "")
@@ -2273,6 +2348,8 @@ class BattleScene:
                 log = (self.log[:-1] if self.phase == "play" else self.log)[-(avail - 2):] if avail > 2 else []
                 lines = ([seg([("Mirando: ", DIM), (a, HI), (" (izquierda)  vs  ", DIM), (b, HI), (" (derecha)", DIM)], width)]
                          + [seg([(t, DIM)], width) for t in log] + [seg([(now, HI)], width)])
+        elif self.confirm:
+            lines = self._confirm_lines(width, avail, clock, tick, left)
         elif self.phase in ("play", "over"):
             lines = [seg([(self.msg, HI)], width)]
         elif self.note_t > 0:
@@ -2308,6 +2385,7 @@ def main():
     args.scale = saved.get("scale", args.scale)
     args.sleep_after = saved.get("sleep_after", args.sleep_after)
     sleep_after = max(0.0, args.sleep_after) * 60
+    BattleScene.speed = int(saved.get("msg_speed", pc.MSG_SPEED_DEFAULT))    # velocidad de los mensajes (tecla o)
     bg = None
     if args.sixel and args.bg.lower() != "none":
         h = args.bg.lstrip("#")
@@ -2382,6 +2460,7 @@ def main():
     tick = 1 / max(5, args.fps)
     last = time.perf_counter()
     drawn_rows = 1         # filas de texto que dibujó el cuadro anterior (para borrar lo que sobre)
+    quit_ask = None        # torneo: Esc en el equipo ("team") o en los ataques ("moves") pregunta antes de abandonar
 
     def flash(text, secs=4, style=HI):
         """Mensaje en la fila de arriba por `secs` s: HI normal, GOOD listo, WARN aviso, BAD error (siempre con
@@ -2602,6 +2681,13 @@ def main():
         if text:
             flash(text, secs, style)
 
+    def tour_quit_risk(where):
+        """¿Esc en el equipo ("team": el prompt) o en los ataques ("moves") del torneo te hace perder la pelea?
+        (Todavía no mandaste el equipo: salir es abandonarla y quedar afuera del torneo.)"""
+        if not (vs and getattr(vs, "tour_match", False) and not vs.sent):
+            return False
+        return bool(picker) if where == "moves" else mode == "vsteam" and not picker
+
     def to_referee(msg):
         """Lo que manda el organizador cuando pelea (su MatchClient): directo al árbitro, sin red."""
         if director:
@@ -2697,7 +2783,7 @@ def main():
                 job = jobs.get()
                 if job[0] == "battle":
                     battling, redraw = False, True
-                    scene = BattleScene(job[1], job[2], px_per_col, job[3])
+                    scene = BattleScene(job[1], job[2], px_per_col, job[3], kind=job[4] if len(job) > 4 else None)
                     flash("", 0)
                 elif job[0] == "vspool":                        # tu equipo cargó: ahora elegís los ataques
                     if vs and getattr(vs, "auto", False) and not vs.sent:     # torneo sin tiempo: va con los sorteados
@@ -2834,8 +2920,17 @@ def main():
                         end_scene(how)
                         redraw = True
                     continue
+                if quit_ask and not tour_quit_risk(quit_ask):
+                    quit_ask = None                     # ya no hace falta: se mandó el equipo, se acabó el tiempo...
+                if quit_ask:                            # ¿abandonar? otro Esc sí; cualquier otra tecla sigue (sin
+                    if ch == "\x1b":                    # una letra: venías escribiendo el equipo)
+                        close_vs("Abandonaste la pelea del torneo", 3)
+                    quit_ask = None
+                    continue
                 if picker:
-                    if ch == "\x1b":
+                    if ch == "\x1b" and tour_quit_risk("moves"):
+                        quit_ask = "moves"
+                    elif ch == "\x1b":
                         close_vs("Saliste de la sala")
                     elif picker.key(ch, cols) == "done":
                         vs.set_team(picker.fighters, vs.my_sprites)
@@ -2871,6 +2966,8 @@ def main():
                         rescale_at = time.time() + 0.6      # si sigue apretando + no rearmar en cada paso
                     elif act and act[0] == "sleep_after":
                         sleep_after = act[1] * 60
+                    elif act and act[0] == "msg_speed":
+                        BattleScene.speed = int(act[1])     # desde el próximo mensaje de batalla
                     continue
                 if gym:
                     gym_key(ch)
@@ -2944,6 +3041,8 @@ def main():
                             loader.request(parts, replace=(mode == "set"))
                             flash("Cargando " + (f"{len(parts)}: " if len(parts) > 1 else "") + ", ".join(parts) + "...", 30)
                         mode, buf = None, ""
+                    elif ch == "\x1b" and tour_quit_risk("team"):
+                        quit_ask = "team"                       # torneo: abandonar es perder, pregunta antes
                     elif ch == "\x1b":
                         if mode == "vsteam":                      # ya estabas en la sala: Esc = salir de ella
                             close_vs("Saliste de la sala", 2)
@@ -2992,7 +3091,8 @@ def main():
                     elif c == "h" and pets:
                         mode, buf = "pet", ""
                     elif c == "o":
-                        setmenu = SettingsMenu({"scale": loader.scale, "sleep_after": sleep_after / 60},
+                        setmenu = SettingsMenu({"scale": loader.scale, "sleep_after": sleep_after / 60,
+                                                "msg_speed": BattleScene.speed},
                                                CONFIG_FILE, pc.find_settings())
 
             # --- tamaño
@@ -3024,8 +3124,12 @@ def main():
             # --- filas de texto arriba: los menús usan varias (en cuadrícula) si hay lugar, si no, una sola
             avail = text_rows_free(pets, rows, args.sixel)
             talking = any(p.say_until > time.time() for p in pets)
+            if quit_ask and not tour_quit_risk(quit_ask):
+                quit_ask = None                         # se acabó el tiempo del equipo, llegó la pelea...
             block = None
-            if setmenu:
+            if quit_ask:
+                block = abandon_rows(cols, avail, vs.secs_left())
+            elif setmenu:
                 block = setmenu.lines(cols, avail)
             elif gym:
                 block = gym_block(avail)

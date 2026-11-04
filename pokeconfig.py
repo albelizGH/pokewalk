@@ -1,7 +1,8 @@
 """
 Configuración de pokewalk, compartida por el juego (tecla `o`) e install.py:
 
-  - config.json en el caché (%LOCALAPPDATA%\\pokewalk): escala, minutos para dormirse, letra y alto del panel.
+  - config.json en el caché (%LOCALAPPDATA%\\pokewalk): escala, minutos para dormirse, letra y alto del panel y
+    velocidad de los mensajes de batalla.
     Lo guardado ahí gana sobre `--scale` / `--sleep-after` de la línea de comandos (las que puso install.py).
   - settings.json de Windows Terminal: el tamaño de letra del perfil "Pokewalk" y el alto del panel (el `size`
     del splitPane del atajo). Antes de la primera escritura de cada sesión se guarda una copia
@@ -30,7 +31,17 @@ FONT_SIZES = list(range(6, 25))
 FONT_DEFAULT = 12                                     # el de Windows Terminal si el perfil no dice nada
 PANELS = [0.12, 0.15, 0.18, 0.22, 0.25, 0.3, 0.35, 0.4, 0.5]
 SLEEPS = [0, 1, 2, 3, 5, 10, 15, 30, 60]              # minutos (0 = nunca)
-LIMITS = {"scale": (0.2, 8), "font_size": (4, 72), "panel": (0.05, 0.9), "sleep_after": (0, 24 * 60)}
+MSG_SPEEDS = [0, 1, 2]                                # mensajes de batalla: 0 lenta, 1 normal, 2 rápida
+MSG_SPEED_NAMES = ("lenta", "normal", "rápida")
+MSG_SPEED_DEFAULT = 1
+# Cuánto queda cada mensaje de batalla: base + letras / letras por segundo, entre un mínimo y un máximo (s). Como los
+# subtítulos (12-17 letras por segundo, ~1 s como mínimo), pero más lento: la vista va y viene entre el texto y la
+# animación. "normal" = 14 letras/s + 0,8 s de reacción; "lenta" = 10 letras/s + 1,2 s (el ritmo de los subtítulos
+# para chicos, con margen); "rápida" (None) = la duración de siempre de cada paso (pokebattle). Enter pasa al siguiente.
+MSG_PACES = {0: (1.2, 10, 2.0, 6.0), 1: (0.8, 14, 1.5, 4.5), 2: None}
+LIMITS = {"scale": (0.2, 8), "font_size": (4, 72), "panel": (0.05, 0.9), "sleep_after": (0, 24 * 60),
+          "msg_speed": (0, 2)}
+INTS = ("font_size", "msg_speed")                     # se guardan como enteros
 
 
 class SettingsError(Exception):
@@ -47,8 +58,18 @@ def clean_config(raw):
         v = raw.get(k)
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
             continue
-        out[k] = int(v) if k == "font_size" else float(v)
+        out[k] = int(v) if k in INTS else float(v)
     return out
+
+
+def msg_secs(text, speed, floor=0.0):
+    """Segundos que queda en pantalla un mensaje de batalla con la velocidad `speed` (ver MSG_PACES), nunca menos
+    que `floor` (lo que pide el paso). Una velocidad desconocida vale como la normal."""
+    pace = MSG_PACES.get(speed, MSG_PACES[MSG_SPEED_DEFAULT])
+    if pace is None:
+        return floor
+    base, cps, lo, hi = pace
+    return max(floor, min(hi, max(lo, base + len(text) / cps)))
 
 
 def load_config(path=CONFIG_FILE):

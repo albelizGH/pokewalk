@@ -44,7 +44,7 @@ elegiste ahí.
 | `c` | cambiar todos: varios separados por espacio + Enter |
 | `x` | sacar: nombre, número o el principio del nombre (`pika`) + Enter. Enter solo saca el último |
 | `r` | agregar uno al azar |
-| `o` | **opciones**: escala de los Pokémon, tamaño de letra, alto del panel y cuándo se duermen (ver [Configuración](#configuración-o)) |
+| `o` | **opciones**: escala de los Pokémon, tamaño de letra, alto del panel, cuándo se duermen y velocidad de los mensajes de batalla (ver [Configuración](#configuración-o)) |
 | `q` | salir |
 | `Esc` | cancelar lo que estás escribiendo |
 
@@ -62,7 +62,7 @@ escrito al lado (`ele 90`).
 
 ## Configuración (`o`)
 
-Con **`o`** se abre la configuración: **`1`-`4`** eligen qué cambiar y **`+`** / **`-`** (o `←` / `→`) cambian el
+Con **`o`** se abre la configuración: **`1`-`5`** eligen qué cambiar y **`+`** / **`-`** (o `←` / `→`) cambian el
 valor. Esc (o Enter) vuelve. Abajo dice cuándo se aplica cada cambio.
 
 | | Opción | Valores | Cuándo se aplica |
@@ -71,6 +71,21 @@ valor. Esc (o Enter) vuelve. Abajo dice cuándo se aplica cada cambio.
 | `2` | Tamaño de letra | 6 a 24 | **ya**: cambia el `font.size` del perfil Pokewalk en el `settings.json` de Windows Terminal, que lo relee solo y se lo aplica al panel abierto. En modo Sixel también agranda o achica a los Pokémon |
 | `3` | Alto del panel | 12% a 50% de la ventana | **la próxima vez que abras el panel** (cambia el `size` del atajo; el panel abierto no se mueve) |
 | `4` | Se duermen después de | nunca, 1 a 60 min | **ya** |
+| `5` | Velocidad de los mensajes de batalla | lenta, normal (default), rápida | **ya** (desde el próximo mensaje) |
+
+**Velocidad de los mensajes:** cada mensaje de la batalla («¡Pikachu usó Impactrueno!») queda en pantalla según lo
+largo que es, como los subtítulos, pero un poco más lento porque la vista va y viene entre el texto y la animación:
+
+| | Cuánto dura cada mensaje | Ej. «¡Pikachu usó Impactrueno!» (25 letras) |
+|---|---|---|
+| lenta | 1,2 s + 1 s cada 10 letras (entre 2 y 6 s) | 3,7 s |
+| normal | 0,8 s + 1 s cada 14 letras (entre 1,5 y 4,5 s) | 2,6 s |
+| rápida | lo de antes: lo que pide cada paso (0,7 a 2,2 s) | 1,2 s |
+
+Nunca dura menos de lo que tarda su animación. Con **Enter** (o espacio) pasás al mensaje siguiente cuando ya lo
+leíste, así que la lenta no te hace esperar. En el torneo cada uno usa su velocidad (también los que miran): el
+árbitro le da a cada turno el tiempo de la **lenta**, así que el reloj de la próxima decisión no empieza a correr
+mientras alguien todavía está leyendo.
 
 - Se guarda en `%LOCALAPPDATA%\pokewalk\config.json` y **gana sobre** `--scale` y `--sleep-after` de la línea de
   comandos (los que puso `install.py` en el perfil). `py install.py --scale 1.5` también lo guarda ahí, así que los dos
@@ -116,9 +131,9 @@ Como en los juegos, **sin objetos**: cada turno elegís **1 Luchar**, **2 Pokém
 |---|---|
 | `1` Luchar | elegís un ataque con `1`-`4` (muestra PP, tipo, poder y `x2` / `x½` / `x0` contra el rival). `0` o Esc vuelve |
 | `2` Pokémon | cambiás de Pokémon con `1`-`6` (el cambio gasta el turno). Si se debilita el tuyo, el cambio es obligatorio |
-| `3` Huir / `q` | te vas de la batalla |
+| `3` Huir / `q` | te vas de la batalla, pero **primero pregunta** (en rojo, por si fue sin querer): `¿Huir? Vas a terminar la batalla.` (en el gimnasio, «abandonar el combate»; contra un amigo, `Vas a perder la pelea contra Beto.`; en el torneo, `...y quedás afuera del torneo.`). **`q`** (o `s`) confirma; Esc o cualquier otra tecla sigue peleando donde estabas, sin gastar el turno. Mientras preguntás, el reloj del torneo sigue corriendo |
 | `a` | piloto automático: tu equipo también lo maneja la computadora (apretá `a` de nuevo para volver a mandar vos) |
-| Enter | volver cuando termina |
+| Enter / espacio | mientras se ven los mensajes del turno: **pasar al siguiente** (ver [velocidad de los mensajes](#configuración-o)). Cuando termina: volver |
 
 **Qué hay:** equipos de hasta 6, PP, prioridad de ataques, estados (parálisis, quemadura, veneno, sueño, hielo,
 confusión), subidas y bajadas de stats, curación, absorción, retroceso, golpes múltiples, amedrentar, críticos,
@@ -181,7 +196,7 @@ Los dos tienen que tener pokewalk (la misma versión) y estar en la misma red Wi
    se arma otro equipo como la primera vez. Enter sale de la sala.
 
 El que creó la sala hace de árbitro (resuelve cada turno y le manda el resultado al otro), así no se desincroniza.
-Si alguien huye (`3` / `q`) o se cae la conexión, el otro lo ve y gana. Es para jugar entre amigos: los equipos los arma
+Si alguien huye (`3` / `q`, y confirma con `q`) o se cae la conexión, el otro lo ve y gana. Es para jugar entre amigos: los equipos los arma
 cada uno, así que nada impide hacer trampa a propósito.
 
 Si es la primera vez, el firewall de Windows va a preguntar si dejás a Python usar la red: aceptá en **redes privadas**.
@@ -222,7 +237,8 @@ en vivo (el organizador también juega).
    Pokémon permitidos; si estabas eligiendo ataques, quedan los sorteados. Nada escrito = todo al azar (los que
    caminan no cuentan si no apretaste Enter). El reloj lo lleva el organizador: si el equipo igual no llega (unos 20 s
    más), él mismo te arma uno al azar.
-7. **En la pelea: 60 s por decisión** (más lo que tarda en verse el turno anterior). En los últimos 15 s aparece la
+7. **En la pelea: 60 s por decisión** (más lo que tarda en verse el turno anterior, calculado con la velocidad de
+   mensajes **lenta**: nadie pierde tiempo por leer despacio). En los últimos 15 s aparece la
    cuenta regresiva (`Te quedan 12 s para elegir`, y para los que miran `Ana: 12 s para elegir`). Si se acaba,
    **perdés el turno**: tu Pokémon no hace nada y el rival juega igual (si tenías que elegir reemplazo, entra el
    primero que puede pelear). **3 turnos perdidos seguidos = perdés la pelea**; elegir algo vuelve la cuenta a 0. No
@@ -230,9 +246,13 @@ en vivo (el organizador también juega).
 8. Todos los demás **miran la pelea en vivo**: la misma pantalla de batalla, sin menús, con `Mirando: Ana vs Beto` y
    lo último que pasó. El organizador arbitra todas las peleas en su compu (las juegue o no): cada uno manda solo su
    jugada y él resuelve el turno y se lo manda a todos.
-9. Abandonar (Esc en el equipo, huir en la batalla) o **desconectarse = perder la pelea y quedar afuera** del
-   torneo: si te tocaba pelear más adelante, tu rival **pasa sin pelear**. Si el organizador cierra pokewalk o sale
-   con Esc, **el torneo se termina para todos** (`Ana cerró el torneo: se terminó para todos.`).
+9. Abandonar (Esc en el equipo o en los ataques, huir en la batalla, Esc en el cuadro) o **desconectarse = perder
+   la pelea y quedar afuera** del torneo: si te tocaba pelear más adelante, tu rival **pasa sin pelear**. Si el
+   organizador cierra pokewalk o sale con Esc, **el torneo se termina para todos** (`Ana cerró el torneo: se terminó
+   para todos.`). Como una tecla sin querer te dejaría afuera, **todas preguntan antes** en rojo
+   (`¿Abandonar? Perdés esta pelea y quedás afuera del torneo.`, `¿Salir del torneo? ...`, `¿Cancelar el torneo? Se
+   termina para todos.`): se confirma con otro **Esc** (en la batalla, con `q`) y cualquier otra tecla sigue donde
+   estabas. El reloj no se frena mientras preguntás. Si ya quedaste afuera (solo mirás), Esc sale sin preguntar.
 10. **Sin ganador** (los dos se debilitan a la vez, los dos pierden 3 turnos seguidos, o no se pudo preparar la pelea):
     se repite **una sola vez** con los mismos equipos; si otra vez no hay ganador, **una moneda** elige quién pasa y
     se avisa a todos.

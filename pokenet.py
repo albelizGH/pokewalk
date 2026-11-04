@@ -38,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 
 import pokebattle as pb
+import pokeconfig as pc
 import pokerelay as pr
 
 PROTO = 2               # 2: salas de torneo (un pokewalk viejo no las entendería: ni las ve ni entra)
@@ -58,8 +59,9 @@ TEAM_GRACE = 20         # s más que espera el árbitro (para que ese equipo se 
 TURN_SECS = 60          # s para cada decisión de la pelea (más lo que tarda en animarse el turno anterior)
 WARN_SECS = 15          # el reloj se muestra en los últimos segundos
 MAX_PASSES = 3          # turnos perdidos seguidos (por tiempo) para perder la pelea
-STEP_SECS = 2.5         # s que se le dan a la pantalla para animar cada paso de un turno
-ANIM_MAX = 40           # tope de ese margen
+STEP_SECS = 2.5         # s que se le dan a la pantalla para animar cada paso de un turno (como mínimo; ver anim_secs)
+ANIM_MAX = 60           # tope de ese margen (un turno largo, leído con la velocidad "lenta", entra)
+ANIM_PAD = 1.0          # s más por turno: lo que tarda en llegar (~0,4 s por internet) y el redondeo de los cuadros
 START_GRACE = 20        # s más para la primera decisión (se bajan los sprites)
 NEXT_SECS = 12          # s entre una pelea y la siguiente (todos ven el cuadro)
 EMPTY = -1              # en el cuadro: nadie (un bye de la 1ª ronda, o se fueron los dos)
@@ -1291,6 +1293,8 @@ class _TourLobby:
     def _foot_started(self):
         if self.bracket and self.bracket["champ"] is not None:
             return "Esc  volver"
+        if self.leave_risk() is None:
+            return "Esc  salir del torneo"
         return "Esc  salir del torneo (perdés tu próxima pelea)"
 
     def set_bracket(self, m):
@@ -1337,6 +1341,9 @@ class _TourLobby:
         if self.stage not in ("lobby", "started"):
             return None
         n = len(self.players)
+        ask = self._confirm_view()
+        if ask:
+            return ask
         if self.stage == "started":
             foot, warn = self._foot_started(), False
             if not self.bracket:
@@ -1364,13 +1371,46 @@ class _TourLobby:
             if self.stage == "connecting":
                 return f"Conectando con {self.target}...      Esc cancela"
             return "Conectado, entrando al torneo...      Esc cancela"
+        if v.get("bad"):                                # la pregunta de salir: entera, sin el cuadro
+            return f"{v['title']}      {v['foot']}"
         code = f"Código  {v['code']}  · " if v.get("code") else ""
         return f"{code}{v['title']}:  " + ", ".join(f"{it[0]}: {it[1]}" if len(it) > 2 else it[1] for it in v["items"]) \
             + f"      {v['foot']}"
 
+    confirm = False         # Esc con el torneo en juego: falta confirmar (un Esc sin querer no te saca)
+
+    def leave_risk(self):
+        """Lo que se pierde si salís ahora, o None si nada (entonces Esc sale directo)."""
+        if self.stage != "started" or (self.bracket and self.bracket["champ"] is not None):
+            return None
+        if self.role == "host":
+            return "Se termina para todos."
+        br = self.bracket
+        if br and any(w is not None and w != self.me and self.me in (a, b) for rnd in br["rounds"] for a, b, w in rnd):
+            return None                                 # ya quedaste afuera: solo mirabas
+        return "Perdés tu próxima pelea y quedás afuera."
+
     def key(self, ch):
-        """Esc -> "cancel" (pokewalk.py llama a close()); el organizador además empieza con Enter."""
-        return "cancel" if ch == "\x1b" else None
+        """Esc -> "cancel" (pokewalk.py llama a close()); el organizador además empieza con Enter. Con el torneo en
+        juego Esc pregunta primero: otro Esc sale; cualquier otra tecla sigue en el torneo."""
+        if self.confirm:
+            self.confirm = False
+            return "cancel" if ch == "\x1b" else None
+        if ch != "\x1b":
+            return None
+        if self.leave_risk():
+            self.confirm = True
+            return None
+        return "cancel"
+
+    def _confirm_view(self):
+        """La pregunta de salir (para `view()`), o None si no hay nada que confirmar."""
+        risk = self.confirm and self.leave_risk()
+        if not risk:
+            return None
+        what = "¿Cancelar el torneo?" if self.role == "host" else "¿Salir del torneo?"
+        return {"title": f"{what} {risk}", "foot": "Esc  sí, salir      cualquier otra tecla  no, sigo",
+                "warn": True, "bad": True, "items": []}
 
 
 class Tournament(_TourLobby):
@@ -1421,6 +1461,8 @@ class Tournament(_TourLobby):
 
     def key(self, ch):
         """Además de Esc: Enter abre la sala; ya empezado, Enter -> "go" (arrancar la primera pelea del cuadro)."""
+        if self.confirm:                                # preguntando si cancelar: Enter es "no"
+            return super().key(ch)
         if self.stage == "started":
             if ch in ("\r", "\n") and not self.begun:
                 return "go"
@@ -1786,6 +1828,19 @@ class Referee:
             steps = b.turn(self._clean(0, self.choice[0]), self._clean(1, self.choice[1]))
         self.choice = [None, None]
         return steps
+
+
+def anim_secs(steps, names=("", "")):
+    """Lo que el árbitro del torneo le da a las pantallas para mostrar un turno antes de que corra el reloj de la
+    próxima decisión. Cada uno elige la velocidad de los mensajes (pokeconfig.MSG_PACES), así que se calcula con la
+    más lenta y con el texto más largo que ve alguien (el jugador, el rival o quien mira, `names`); nunca menos que
+    STEP_SECS por paso (la animación del ataque), más ANIM_PAD, con tope ANIM_MAX. Así nadie pierde tiempo de
+    decisión por leer."""
+    total = 0.0
+    for st in steps:
+        text = max((pb.resolve_text(st.text, me, names) for me in (0, 1, None)), key=len)
+        total += max(STEP_SECS, pc.msg_secs(text, pc.MSG_SPEEDS[0], st.dur))
+    return min(ANIM_MAX, total + ANIM_PAD if steps else 0.0)
 
 
 def turn_msg(b, steps, flip=False, **extra):
@@ -2210,7 +2265,7 @@ class MatchReferee:
     def _turn(self, steps):
         b = self.ref.b
         self.nturn += 1
-        self.anim = min(ANIM_MAX, STEP_SECS * len(steps))
+        self.anim = anim_secs(steps, (self.players[0]["name"], self.players[1]["name"]))
         plain, flipped = turn_msg(b, steps, m=self.mid), turn_msg(b, steps, flip=True, m=self.mid)
         for p in self.tour.players:
             if p["id"] not in self.tour.gone:
