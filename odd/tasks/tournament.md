@@ -31,7 +31,7 @@ participant watching the current match live.
   room discovery; lobby shows players; organizer starts with 3+. Disconnects in lobby are removed. — route: delegated writer
 - [x] T2 Headless referee + spectators: run the battle referee independently of the organizer's own BattleScene;
   broadcast turn steps/state to both fighters and to spectators, who render it read-only. — route: delegated writer
-- [ ] T3 Bracket flow + timers: seeding/byes, sequential matches, team-selection 60 s random fill, 60 s turn timer
+- [x] T3 Bracket flow + timers: seeding/byes, sequential matches, team-selection 60 s random fill, 60 s turn timer
   with lost turn and 3-strike loss, disconnect = loss, bracket view, champion screen. — route: delegated writer
 - [x] T4 (runs before T2) Room rules `legendarios sí/no` and `míticos sí/no` as two separate rules (PokeAPI
   `is_legendary` / `is_mythical` in pokemon_species.csv), for versus and tournament: shown with the rules, typed
@@ -199,5 +199,64 @@ user's own command; branch push after that).
   `dex_block`, `dex_text`, `add_preview` were only compiled, not driven), narrow-terminal truncation of the longer
   footer/title, and the background species warm-up timing.
 
+### T3 (bracket flow + timers) — done, uncommitted at time of writing
+- Route: delegated writer (pokenet.py, pokewalk.py, README.md). Size ~710 changed lines (pokenet ~+480/-35,
+  pokewalk ~+130/-30, README ~+30/-6): over the 400 heuristic because the director, the referee clocks and the client
+  timeouts only make sense together. pokebattle.py unchanged. Test-first exception: no runnable harness for the main
+  loop; pure helpers + injectable clock were checked with scripts, the network path with a localhost smoke.
+- Bracket (pure, pokenet): `make_bracket(ids, rng)` -> list of rounds of `[a, b, winner]` (None = unknown,
+  `EMPTY = -1` = nobody); byes only in round 1, one per match at spread positions (`i * half // byes`), resolved at
+  creation; `advance(rounds, r, j, w)` + `_settle` (an EMPTY side passes the other); `next_match` (bracket order);
+  `champion`; `round_name` (Cuartos/Semi/Final). Wire: `{"t": "bracket", rounds, cur, gone, champ, begun, next, note}`
+  org -> all; `_TourLobby.set_bracket()` (guests on the message, organizer directly) feeds a shared `view()`:
+  items `(round, "Ana vs Beto → Ana", current)` (current drawn in WARN by `room_block`), "pasa directo", "(se fue)",
+  title = note / "próxima pelea en N s" / "¡X es el campeón del torneo!".
+- `TourDirector(tour, make_chart, build_team, rng, clock)` (organizer): draws the bracket on start, waits for the
+  organizer's Enter (`Tournament.key` -> "go", replaces the T2 test-match keys), then runs one `MatchReferee` at a
+  time; next match NEXT_SECS (12) + last-turn animation allowance after the previous one. Walkover: a player in
+  `tour.gone` when its match comes up loses it without playing. Draw rule (any `over` with winner None: both fainted,
+  both 3 strikes, chart failure, referee error): replay once with the same teams (fresh copies, `m_prep` with
+  `"replay": true`, no team prompt); a second no-winner -> `rng.choice` coin flip, announced in the note. Champion ->
+  `("champion", id)`; after the champion the guests ignore the organizer's close and keep the final screen until Esc.
+  Organizer Esc/quit before that -> guests get "X cerró el torneo: se terminó para todos."
+- Timers (referee-authoritative, module constants TEAM_SECS 60, TEAM_GRACE 20, TURN_SECS 60, WARN_SECS 15,
+  MAX_PASSES 3, STEP_SECS 2.5, ANIM_MAX 40, START_GRACE 20, NEXT_SECS 12; read at call time so tests shrink them):
+  - Team: `m_prep` carries `secs`; `MatchTeam(secs, clock)` exposes `secs_left()` / `late()`; the vsteam prompt and
+    the move picker show the seconds. At the client deadline pokewalk's `team_timeout()` sends what it has:
+    `partial_team(typed, walking, size, rules)` keeps typed names that exist, are allowed and not repeated (`:level`
+    ignored), fills the rest with `random_allowed`; nothing typed = all random (walking Pokémon don't count unless
+    Enter was pressed); if already loading it sends on arrival; in the picker it sends the pre-rolled moves. Referee
+    hard deadline TEAM_SECS + TEAM_GRACE: missing sides are locked (a late `m_team` is ignored) and built by
+    `build_team(n, rules)` in a thread (`random_team` in pokewalk: `random_allowed` + `load_fighter` + handicap);
+    `m_note` tells everyone; build failure -> that side forfeits (both -> no winner).
+  - Battle: `m_clock {secs, who, lost}` after `m_start` (TURN_SECS + START_GRACE) and after every turn (TURN_SECS +
+    STEP_SECS per step, capped); at the deadline every waiting side gets a strike and `Referee.pass_turn`; MAX_PASSES
+    consecutive -> forfeit (both at once -> no winner). A real accepted action resets the count. Actions carry `n`
+    (turns seen); a stale one (sent before a pass reached the client) is dropped and does not reset the count.
+  - Client: `MatchSession.clock_text()` -> "Te quedan 12 s para elegir (turnos perdidos seguidos: 2 de 3)" for the
+    deciding player, "Ana: 12 s para elegir" for spectators, only in the last WARN_SECS; `BattleScene.hud` shows it
+    above the menu (or inline). `BattleScene._poll_net` now animates a turn that arrives while the menu is open (the
+    referee passed you); tournament over screens close after 6 s so the bracket is visible between matches; a finished
+    scene is closed when your next team prompt opens.
+- Evidence:
+  - `py -m py_compile pokewalk.py pokenet.py pokebattle.py`: exit 0. pyflakes (scratchpad lib): exit 0, no output.
+  - `check_t3.py` (scratchpad, `py -X utf8 -I`): exit 0. Brackets for 2..8 players x 60 seeds: n-1 matches, byes =
+    size-n only in round 1, no bye-vs-bye, every player once; walkover/EMPTY helpers; referee team fill with fake
+    clock (side locked, late team ignored, m_note), no builder -> missing side loses, both fail -> no winner; 1500 fills
+    with legend/myth off respect size and rules; `partial_team` keeps valid part and fills; 2 passes then a real
+    action resets, stale action dropped, 3 passes -> loss "Beto perdió 3 turnos seguidos"; both 3 -> no winner; client
+    clock text; scene shows the clock and animates a turn arriving with the menu open; director: waits for go,
+    walkover of a gone player, champion view; draw rule replay (same teams, `replay` flag) then coin flip.
+  - `smoke_t3.py` (scratchpad, localhost sockets, timers shrunk): 4-player and 5-player tournaments to a champion
+    with a lazy player (referee random fill), an AFK player (3-strike loss), a guest dropped between matches
+    (walkover) and the organizer playing through a headless BattleScene whose first decision per match times out;
+    all guests end with the organizer's bracket, champion and gone set, champion title; org close after the champion
+    gives no error. 7/7 runs pass (seeds 1-7, ~25 s each).
+  - `smoke_t2.py` updated (Enter now returns "go" instead of a test match; the rest unchanged): exit 0.
+    `smoke_tour.py`, `check_rules.py`, `check_t4.py`, `check_t6.py`: exit 0 unchanged.
+  - Not verified: on-screen rendering (bracket grid, highlighted match, countdown rows, picker timer line) in Windows
+    Terminal; the main() wiring (`team_timeout`, `vspool`/`vserror` auto paths, director/key routing) beyond pyflakes;
+    real sprite/PokeAPI downloads within the timers; real LAN.
+
 ## Next step
-T3.
+T5 (internet mode via MQTT relay).

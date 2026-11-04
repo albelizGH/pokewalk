@@ -742,7 +742,7 @@ PROMPTS = {
     "vslevel": "Nivel de la sala (1-100; cada Pokémon queda ±5 al azar; Enter solo = 50;  Esc vuelve)",
     "vsteam": "Conectado con {peer} · Sala: {rules}. Tu equipo (hasta {size}, solo nombres; Enter solo = los que caminan;  Tab = lista)",
     "vsteam_again": "Revancha con {peer} · Sala: {rules}. Enter solo = el mismo equipo y ataques de recién; o armá otro (hasta {size};  Tab = lista)",
-    "vsteam_tour": "Torneo · tu pelea contra {peer} · {rules}. Tu equipo (hasta {size}, solo nombres; Enter solo = los que caminan;  Tab = lista)",
+    "vsteam_tour": "Torneo · contra {peer} · {rules} · quedan {secs} s (después, el resto al azar). Tu equipo (hasta {size}; Enter solo = los que caminan;  Tab = lista)",
 }
 DEX_MODES = ("add", "set", "battle", "info", "vsteam")   # prompts donde Tab abre la lista por región
 
@@ -962,6 +962,37 @@ def parse_vs_team(parts, walking, size, rules=None):
         if problem:
             raise ValueError(problem + ("" if parts else " (camina con vos: escribí tu equipo)"))
     return names or random_allowed(size, rules)
+
+
+def partial_team(parts, walking, size, rules=None):
+    """Torneo, se acabó el tiempo del equipo: vale lo escrito que sirva (nombres o números que existen y la sala
+    permite, sin repetir, hasta `size`; un `:nivel` se ignora) y el resto se completa al azar con permitidos.
+    Nada escrito = todo al azar (los que caminan no cuentan: no los eligió). Siempre devuelve `size` nombres."""
+    keep, seen = [], set()
+    for term in parts:
+        name = term.partition(":")[0]
+        try:
+            dex, key = resolve(expand_name(name, walking))
+        except (OSError, ValueError):
+            continue
+        if dex in seen or pn.rule_problem(dex, pb.pretty(key), rules):
+            continue
+        seen.add(dex)
+        keep.append(str(dex))
+        if len(keep) == size:
+            break
+    fill = [d for d in random_allowed(size + len(keep), rules) if int(d) not in seen]
+    return keep + fill[:size - len(keep)]
+
+
+def random_team(n, rules):
+    """El árbitro del torneo (en un hilo): `n` Pokémon al azar que la sala permite, al nivel de la sala con su
+    handicap y los ataques sorteados (para el que no mandó su equipo a tiempo)."""
+    out = []
+    for d in random_allowed(n, rules):
+        dex, key = resolve(d)
+        out.append(pb.load_fighter(fetch, dex, key, handicap_level(rules["level"])))
+    return out
 
 
 def room_level(text):
@@ -1432,7 +1463,8 @@ class BattleScene:
                 self.peer_gone = True
             elif ev[0] == "rematch":
                 return "rematch"
-        if self.phase == "wait" and self.queued:
+        # en el torneo el árbitro puede resolver sin vos (se te acabó el tiempo): el turno llega con el menú abierto
+        if self.queued and self.phase in ("wait", "main", "fight", "switch"):
             self._start(self.queued.pop(0))
         return None
 
@@ -1576,7 +1608,9 @@ class BattleScene:
             self.over_t += dt
             if self.net and self.rematch_ok:
                 self.msg = self._over_msg()                 # cambia cuando el otro pide la revancha o se va
-            if self.over_t > (15 if not self.net else 180 if self.net.rematchable else 20):     # se aburrió de esperar
+            # se aburrió de esperar (en el torneo, enseguida: después se ve el cuadro y sigue la próxima pelea)
+            tour = isinstance(self.net, pn.MatchSession)
+            if self.over_t > (15 if not self.net else 180 if self.net.rematchable else 6 if tour else 20):
                 return "done"
         elif self.auto:
             self.wait -= dt
@@ -1705,9 +1739,12 @@ class BattleScene:
         (lp, la), (rp, ra) = self._bar(0, cols), self._bar(1, cols)
         out = f"\x1b[1;1H\x1b[2K{la}\x1b[1;{max(len(lp) + 2, cols - len(rp))}H{ra}"
         width = max(10, cols - 1)
+        clock = getattr(self.net, "clock_text", None)
+        deciding = self.phase == "wait" if self.watch else self.phase in ("main", "fight", "switch")
+        clock = clock() if clock and deciding else None    # torneo: el reloj del árbitro (últimos segundos)
         if self.watch:                                     # mirando: quién pelea y el registro de la pelea
             a, b = self.watch
-            now = self.msg if self.phase in ("play", "over") else "eligiendo..."
+            now = self.msg if self.phase in ("play", "over") else "eligiendo..." + (f"   ({clock})" if clock else "")
             if avail < 2:
                 lines = [seg([(f"Mirando: {a} vs {b} · ", DIM), (now, HI)], width)]
             else:
@@ -1722,6 +1759,10 @@ class BattleScene:
             lines = [seg([("Piloto automático   (a: tomar el control   q: huir)", HI)], width)]
         else:
             lines = self._menu_cells(cols, avail) or [seg([(self.menu(), HI)], width)]
+            if clock and len(lines) < avail:               # tu reloj, arriba del menú
+                lines = [seg([(clock, WARN)], width)] + lines
+            elif clock:
+                lines = [seg([(clock + "   ", WARN), (self.menu(), HI)], width)]
         return out + put_rows(lines, 2, 1 + avail)
 
 
@@ -1780,7 +1821,7 @@ def main():
     pv = {"key": None, "parts": None, "warm": False}   # vista previa de add/set (se calcula al cambiar lo escrito)
     vs = None              # sala de versus en red (tecla v): pokenet.Versus
     tour = None            # torneo (se crea o se entra desde el versus): pokenet.Tournament | TournamentClient
-    match_ref = None       # el organizador arbitrando una pelea del torneo: pokenet.MatchReferee
+    director = None        # el organizador: el cuadro y las peleas del torneo (pokenet.TourDirector)
     mc = None              # las peleas del torneo desde acá (juego o miro): pokenet.MatchClient
     picker = None         # elegir ataques del equipo de versus: MovePicker
     w = sys.stdout.write
@@ -1931,8 +1972,9 @@ def main():
         tiene menú)."""
         if not v:
             return None
-        return grid([(v["title"], WARN if v.get("warn") else HI)], [opt(k, label) for k, label in v["items"]],
-                    [(v["foot"], DIM)], cols, avail, 3)
+        items = [[(it[0], KEY), (" " + it[1], WARN)] if len(it) > 2 and it[2] else opt(it[0], it[1])
+                 for it in v["items"]]                     # (tecla, texto[, resaltado]): la pelea en curso del cuadro
+        return grid([(v["title"], WARN if v.get("warn") else HI)], items, [(v["foot"], DIM)], cols, avail, 3)
 
     def idle_block(avail, talking):
         """Ayuda de teclas (dos filas agrupadas si hay lugar y ancho; si no, una sola con lo esencial)."""
@@ -2156,37 +2198,72 @@ def main():
 
     def close_tour(text="", secs=5):
         """Sale del torneo (el organizador lo cierra para todos)."""
-        nonlocal tour, match_ref, mc
+        nonlocal tour, director, mc
         if scene and isinstance(scene.net, pn.MatchSession):
             scene.net.abort(text or "Se cerró el torneo.")
         if vs and getattr(vs, "tour_match", False):
             close_vs()
         if tour:
             tour.close()
-        tour = match_ref = mc = None
+        tour = director = mc = None
         if text:
             flash(text, secs)
 
     def to_referee(msg):
         """Lo que manda el organizador cuando pelea (su MatchClient): directo al árbitro, sin red."""
-        if match_ref:
-            match_ref.receive(0, msg)
+        if director:
+            director.receive(0, msg)
 
     def on_match(events):
         """Eventos de las peleas del torneo (de `MatchClient.handle`)."""
-        nonlocal vs, mode, buf, cur, prompt_err
+        nonlocal vs, mode, buf, cur, prompt_err, dex
         for ev in events:
             if ev[0] == "note" and tour:
                 tour.note = ev[1]
                 flash(ev[1], 4)
             elif ev[0] == "team":                      # te toca: el prompt del equipo de siempre
+                if scene and isinstance(scene.net, pn.MatchSession) and (scene.net.done or scene.net.left):
+                    end_scene("done")                  # la pelea anterior ya terminó: que no tape el prompt
                 close_vs()
-                vs = ev[1]
+                vs, dex = ev[1], None
                 mode, buf, cur, prompt_err = "vsteam", "", 0, ""
             elif ev[0] == "start":
                 threading.Thread(target=prepare_match, args=(ev[1], loader, jobs), daemon=True).start()
             elif ev[0] == "over" and tour:
                 tour.note = f"Terminó la pelea: {ev[2]}"
+                if vs and getattr(vs, "tour_match", False) and mc and vs.mid == mc.mid:
+                    vs.sent = True                     # terminó antes de que mandaras el equipo: no hay a quién
+                    dex = None if mode == "vsteam" else dex
+                    close_vs()
+
+    def team_timeout():
+        """Torneo: se acabó el tiempo para armar el equipo. Vale lo escrito que sirva y el resto va al azar
+        (`partial_team`); si ya cargó, quedan los ataques sorteados. El árbitro espera un poco más y, si ni así
+        llega, lo completa él."""
+        nonlocal mode, buf, dex, picker
+        if not (vs and getattr(vs, "tour_match", False) and vs.late()):
+            return
+        vs.auto = True
+        if picker:                                     # eligiendo ataques: quedan los sorteados
+            vs.set_team(picker.fighters, vs.my_sprites)
+            picker = None
+            flash("Se acabó el tiempo: quedan los ataques sorteados", 4)
+        elif vs.stage == "team":                       # todavía escribiendo: lo que valga + el resto al azar
+            typed = (buf if mode == "vsteam" else last_input.get("vsteam", "")).split()
+            if mode == "vsteam":
+                mode, buf = None, ""
+            dex = None
+            walking = [p.name for p in pets]
+            try:
+                names = partial_team(typed, walking, vs.rules["size"], vs.rules)
+            except (OSError, ValueError) as e:         # sin la lista de especies: que lo complete el árbitro
+                flash(f"Se acabó el tiempo y no pude completar tu equipo: {e}", 6)
+                return
+            vs.stage = "loading"
+            flash("Se acabó el tiempo: tu equipo se completa al azar...", 30)
+            threading.Thread(target=load_my_team, daemon=True,
+                             args=(names, loader, jobs, walking, vs.rules["level"])).start()
+        # cargando: cuando llegue ("vspool") se manda solo, con los ataques sorteados
 
     def vs_connect(text):
         """Tecla v -> 3: `ip` o `ip:puerto`."""
@@ -2230,7 +2307,10 @@ def main():
                     scene = BattleScene(job[1], job[2], px_per_col, job[3])
                     flash("", 0)
                 elif job[0] == "vspool":                        # tu equipo cargó: ahora elegís los ataques
-                    if vs:
+                    if vs and getattr(vs, "auto", False) and not vs.sent:     # torneo sin tiempo: va con los sorteados
+                        vs.set_team(job[1], job[3])
+                        flash("Equipo completado y enviado (ataques sorteados)", 4)
+                    elif vs and not getattr(vs, "sent", False):
                         picker = MovePicker(job[1], job[2])
                         vs.my_sprites, vs.stage = job[3], "moves"
                         flash("", 0)
@@ -2255,7 +2335,9 @@ def main():
                         flash("", 0)
                 elif job[0] == "vserror":                       # falló el equipo: reabrir el prompt con lo escrito
                     flash(job[1], job[2])
-                    if vs and mode is None:
+                    if vs and getattr(vs, "auto", False):       # torneo sin tiempo: lo completa el árbitro
+                        vs.stage = "waiting"
+                    elif vs and mode is None and not getattr(vs, "sent", False):
                         vs.stage = "team"
                         mode, buf, prompt_err = "vsteam", last_input.get("vsteam", ""), job[1].rsplit(": ", 1)[-1]
                         cur = len(buf)
@@ -2316,15 +2398,25 @@ def main():
                     if ev[0] == "start":
                         send = to_referee if tour.role == "host" else tour.send
                         mc = pn.MatchClient(tour.me, tour.name, send, lambda: pb.TypeChart(fetch))
+                        if tour.role == "host":         # el organizador sortea el cuadro y lleva las peleas
+                            director = pn.TourDirector(tour, lambda: pb.TypeChart(fetch), random_team)
                     elif ev[0] == "msg" and mc and tour.role == "guest":
                         on_match(mc.handle(ev[1]))
-                if tour and match_ref:
-                    revs = match_ref.update(tevs)
-                    for m in match_ref.take_local():    # lo del organizador: a su MatchClient, sin red
+                    elif ev[0] == "bracket" and ev[1]:
+                        flash(ev[1], 6)
+                if tour and director:
+                    devs = director.update(tevs)
+                    for m in director.take_local():     # lo del organizador: a su MatchClient, sin red
                         if mc:
                             on_match(mc.handle(m))
-                    if any(ev[0] == "over" for ev in revs):
-                        match_ref = None                # (T3: acá sigue el cuadro)
+                    for ev in devs:
+                        if ev[0] == "bracket" and ev[1]:
+                            flash(ev[1], 6)
+                if tour and tour.bracket and tour.bracket["champ"] not in (None, pn.EMPTY) \
+                        and not getattr(tour, "cheered", False):
+                    tour.cheered = True                 # una vez: el campeón, para todos
+                    flash(f"¡{tour.name_of(tour.bracket['champ'])} es el campeón del torneo!", 10)
+                team_timeout()
             # --- teclado
             typed = keys.read()
             if typed:
@@ -2348,12 +2440,10 @@ def main():
                 if tour and not mode:
                     act = tour.key(ch)
                     if act == "cancel":
-                        close_tour("Saliste del torneo", 2)
-                    elif isinstance(act, tuple) and act[0] == "match":     # pelea de prueba (T3: el cuadro)
-                        if match_ref:
-                            flash("Ya hay una pelea en curso", 3)
-                        else:
-                            match_ref = pn.MatchReferee(tour, act[1], act[2], pb.TypeChart(fetch))
+                        done = tour.bracket and tour.bracket["champ"] is not None
+                        close_tour("Terminó el torneo" if done else "Saliste del torneo", 2)
+                    elif act == "go" and director:          # el organizador arranca la primera pelea del cuadro
+                        director.go()
                     continue
                 if vs and not mode:
                     act = vs.key(ch)
@@ -2516,16 +2606,23 @@ def main():
                 label = f"{prompt_err}  →  corregí y Enter (Esc cancela)" if prompt_err else PROMPTS[mode]
                 if mode == "vsteam" and vs and not prompt_err:
                     kind = "vsteam_tour" if getattr(vs, "tour_match", False) else "vsteam_again" if vs.prev_team else "vsteam"
-                    label = PROMPTS[kind].format(
-                        peer=vs.peer, rules=pn.rules_text(vs.rules), size=vs.rules["size"])
+                    label = PROMPTS[kind].format(peer=vs.peer, rules=pn.rules_text(vs.rules), size=vs.rules["size"],
+                                                 secs=vs.secs_left() if kind == "vsteam_tour" else "")
+                elif mode == "vsteam" and getattr(vs, "tour_match", False):
+                    label += f" · quedan {vs.secs_left()} s"
                 status = prompt_line(label, buf, cur, cols)
                 if mode in ("add", "set") and not prompt_err and avail >= 2:
                     line = add_preview()
                     if line:
                         block = [status, seg(line, max(10, cols - 1))]
             elif picker:
-                block = picker.lines(cols, avail)
-                status = None if block else status_line(picker.text(cols), cols, True)
+                left = vs.secs_left() if getattr(vs, "tour_match", False) else None
+                block = picker.lines(cols, avail - (1 if left is not None else 0))
+                if block and left is not None:           # torneo: el reloj de los ataques arriba
+                    block = [seg([(f"Quedan {left} s para elegir los ataques (si se acaba, quedan los sorteados)",
+                                   WARN)], max(10, cols - 1))] + block
+                status = None if block else status_line(
+                    (f"[{left} s] " if left is not None else "") + picker.text(cols), cols, True)
             elif tour:
                 block = room_block(tour.view(), avail)
                 status = None if block else status_line(tour.text(), cols, True)

@@ -150,8 +150,8 @@ La sala usa el puerto TCP 5757 y los avisos van por UDP 5758.
 
 ### Torneo en la misma red (`v` → 4)
 
-Para jugar entre 3 y 8 en la misma red. Por ahora están **la sala del torneo** y **peleas de prueba** que todos miran
-en vivo; el cuadro (eliminación directa) y los relojes llegan en la próxima versión.
+Para jugar entre 3 y 8 en la misma red: **eliminación directa**, una pelea por vez, y todos los que no pelean la miran
+en vivo (el organizador también juega).
 
 1. El organizador aprieta **`v`**, elige **4 Crear torneo** y fija las reglas como en una sala de versus (de cuántos
    Pokémon son los equipos, el nivel y si entran legendarios / míticos).
@@ -160,15 +160,33 @@ en vivo; el cuadro (eliminación directa) y los relojes llegan en la próxima ve
    **3 Conectar por IP** (la IP del organizador): pokewalk se da cuenta solo de que es un torneo.
 3. En la sala todos ven la lista de jugadores y las reglas. Si alguien se va o se le corta la conexión, sale de la lista.
    Esc sale del torneo (si es el organizador, lo cierra para todos).
-4. Con 3 o más, el organizador aprieta **Enter** para empezar: la sala se cierra (ya no entra nadie más) y todos
-   reciben la lista final de jugadores.
-5. Pelea de prueba: el organizador aprieta **Enter** (el 1º contra el 2º de la lista, o sea él contra el primero que
-   entró) o **2** (el 2º contra el 3º: pelean dos invitados y él mira). A los dos que pelean les aparece el prompt del
-   equipo de siempre (con las reglas de la sala) y después los ataques; Esc ahí, o huir en la batalla, es abandonar la
-   pelea (gana el otro). Si a alguien se le corta la conexión, pierde.
-6. Todos los demás **miran la pelea en vivo**: la misma pantalla de batalla, sin menús, con `Mirando: Ana vs Beto` y
+4. Con 3 o más, el organizador aprieta **Enter** para empezar: la sala se cierra (ya no entra nadie más) y se sortea
+   **el cuadro**, que ven todos: las rondas (`Cuartos`, `Semi`, `Final`), quién pasó, la pelea en curso resaltada
+   (`▶ Ana vs Beto`) y quién se fue. Si no son 4 u 8, a algunos les toca **pasar directo** (bye) a la 2ª ronda: solo
+   en la 1ª ronda y nunca dos byes en la misma pelea (con 5: uno pelea en la 1ª ronda y tres pasan directo).
+5. El organizador aprieta **Enter** otra vez para la primera pelea; las siguientes arrancan solas unos 12 s después
+   de terminada la anterior (en ese rato se ve el cuadro con el resultado y cuánto falta).
+6. **Armar el equipo: 60 s.** A los dos que pelean les aparece el prompt del equipo de siempre (con las reglas de la
+   sala y los segundos que quedan) y después los ataques. Si se acaba el tiempo: vale lo que estaba escrito que sirva
+   (nombres o números que existen y la sala permite; lo que no, se descarta) y **el resto se completa al azar** con
+   Pokémon permitidos; si estabas eligiendo ataques, quedan los sorteados. Nada escrito = todo al azar (los que
+   caminan no cuentan si no apretaste Enter). El reloj lo lleva el organizador: si el equipo igual no llega (unos 20 s
+   más), él mismo te arma uno al azar.
+7. **En la pelea: 60 s por decisión** (más lo que tarda en verse el turno anterior). En los últimos 15 s aparece la
+   cuenta regresiva (`Te quedan 12 s para elegir`, y para los que miran `Ana: 12 s para elegir`). Si se acaba,
+   **perdés el turno**: tu Pokémon no hace nada y el rival juega igual (si tenías que elegir reemplazo, entra el
+   primero que puede pelear). **3 turnos perdidos seguidos = perdés la pelea**; elegir algo vuelve la cuenta a 0. No
+   hay piloto automático: la máquina no juega por nadie.
+8. Todos los demás **miran la pelea en vivo**: la misma pantalla de batalla, sin menús, con `Mirando: Ana vs Beto` y
    lo último que pasó. El organizador arbitra todas las peleas en su compu (las juegue o no): cada uno manda solo su
    jugada y él resuelve el turno y se lo manda a todos.
+9. Abandonar (Esc en el equipo, huir en la batalla) o **desconectarse = perder la pelea y quedar afuera** del
+   torneo: si te tocaba pelear más adelante, tu rival **pasa sin pelear**. Si el organizador cierra pokewalk o sale
+   con Esc, **el torneo se termina para todos** (`Ana cerró el torneo: se terminó para todos.`).
+10. **Sin ganador** (los dos se debilitan a la vez, los dos pierden 3 turnos seguidos, o no se pudo preparar la pelea):
+    se repite **una sola vez** con los mismos equipos; si otra vez no hay ganador, **una moneda** elige quién pasa y
+    se avisa a todos.
+11. Al final, todos ven **`¡Ana es el campeón del torneo!`** con el cuadro completo; Esc vuelve a lo de siempre.
 
 Todos se conectan solo a la compu del organizador, así que tiene que poder recibir conexiones (el mismo permiso de
 Windows que para crear una sala de versus). Hace falta la misma versión de pokewalk en todas las compus.
