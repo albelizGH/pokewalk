@@ -739,6 +739,7 @@ PROMPTS = {
     "pet": "Mimar a (nombre, número o principio; Enter solo = uno al azar)",
     "info": "Info de (nombre, número o principio; Enter solo = uno que camina;  Tab = lista por región)",
     "vsip": "IP del amigo (ej. 192.168.1.20; Esc vuelve)",
+    "vscode": "Código de la sala por internet (ej. PIKA-7F3K-92QD; da igual mayúsculas y guiones;  Esc vuelve)",
     "vslevel": "Nivel de la sala (1-100; cada Pokémon queda ±5 al azar; Enter solo = 50;  Esc vuelve)",
     "vsteam": "Conectado con {peer} · Sala: {rules}. Tu equipo (hasta {size}, solo nombres; Enter solo = los que caminan;  Tab = lista)",
     "vsteam_again": "Revancha con {peer} · Sala: {rules}. Enter solo = el mismo equipo y ataques de recién; o armá otro (hasta {size};  Tab = lista)",
@@ -2191,7 +2192,7 @@ def main():
         if vs:
             vs.close()
         vs = picker = None
-        if mode in ("vsteam", "vsip", "vslevel"):
+        if mode in ("vsteam", "vsip", "vscode", "vslevel"):
             mode, buf = None, ""
         if text:
             flash(text, secs)
@@ -2451,6 +2452,8 @@ def main():
                         close_vs("Saliste de la sala", 2)
                     elif act == "ip":
                         mode, buf, cur, prompt_err = "vsip", "", 0, ""
+                    elif act == "code":
+                        mode, buf, cur, prompt_err = "vscode", "", 0, ""
                     elif act == "level":
                         mode, buf, cur, prompt_err = "vslevel", "", 0, ""
                     continue
@@ -2512,6 +2515,10 @@ def main():
                                 vs.ask_special(level)       # falta: ¿legendarios y míticos?
                         elif mode == "vsip":
                             vs_connect(buf)
+                        elif mode == "vscode":
+                            if vs and not vs.join_code(buf):    # se queda en el prompt para corregir
+                                prompt_err = "Ese código no es válido: son 8 letras o números, como PIKA-7F3K-92QD"
+                                continue
                         elif parts:
                             parts, cut = expand_ranges(parts)
                             loader.request(parts, replace=(mode == "set"))

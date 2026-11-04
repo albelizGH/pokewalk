@@ -65,7 +65,7 @@ El hook envuelve `prompt` sin alterar `$?` ni `$LASTEXITCODE`, así que convive 
 | Tecla | Qué hace |
 |---|---|
 | `b` | **batalla** por equipos (abajo): `pika char` = 1 contra 1, `pika char vs mew snor` = equipos de hasta 6, Enter solo = 3 contra 3 al azar; en la lista (`Tab`), `Tab` escribe el `vs` y lo que sigue es el rival |
-| `v` | **versus contra un amigo** en la misma red (abajo, "Versus contra un amigo"), o un **torneo** de 3 a 8 (abajo, "Torneo") |
+| `v` | **versus contra un amigo** en la misma red (abajo, "Versus contra un amigo"), o un **torneo** de 3 a 8 (abajo, "Torneo"); con **5**, lo mismo **por internet** con un código (abajo, "Jugar por internet") |
 | `g` | **combates de gimnasio** (abajo): líderes, Alto Mando y campeón de Kanto y Johto |
 | `i` | **info**: tipo, stats base, altura y peso de un Pokémon (Enter solo = uno que camina) |
 | `h` | **mimar**: escribís a quién (nombre, número o el principio: `pika`; varios con espacio) y se alegra y te dice algo. Enter solo = uno al azar |
@@ -190,6 +190,42 @@ en vivo (el organizador también juega).
 
 Todos se conectan solo a la compu del organizador, así que tiene que poder recibir conexiones (el mismo permiso de
 Windows que para crear una sala de versus). Hace falta la misma versión de pokewalk en todas las compus.
+
+### Jugar por internet (sin instalar nada) (`v` → 5)
+
+Para jugar con amigos que **no están en tu red** (cada uno en su casa), versus 1 contra 1 o torneo, sin instalar nada
+más ni tocar el router: los mensajes pasan por un servidor público y gratuito.
+
+1. El que crea aprieta **`v`** → **5 Por internet** → **1 Crear sala** o **2 Crear torneo**, y fija las reglas igual
+   que en la red local (tamaño de los equipos, nivel, legendarios / míticos). Al rato (unos segundos: se conecta al
+   servidor) aparece **el código de la sala**, por ejemplo **`PIKA-7F3K-92QD`**: se lo pasás a tus amigos por
+   WhatsApp o lo que sea.
+2. Los demás aprietan **`v`** → **5 Por internet** → **3 Unirse con un código** y lo escriben. Da igual mayúsculas,
+   minúsculas, guiones o espacios (`pika7f3k92qd` sirve), y la `O` vale como `0` y la `I` / `L` como `1`. Si el código
+   está mal o la sala ya se cerró: `Nadie contestó en la sala ...`. Pokewalk se da cuenta solo de si es un 1 contra 1
+   o un torneo.
+3. De ahí en adelante es **igual que en la red local**: la sala, el equipo, los ataques, la batalla, la revancha, el
+   cuadro del torneo, los relojes y los que miran. El que creó la sala sigue siendo el árbitro. Si la sala de 1 contra
+   1 ya tiene rival o el torneo ya empezó, el que llega tarde ve `La sala está llena.` / `El torneo ya empezó.`.
+
+Cosas a saber:
+- **Servidor:** `broker.hivemq.com` (MQTT sobre TLS, puerto 8883: una conexión saliente común, como abrir una web). Si
+  no anda, la sala se abre sola en el de respaldo, `broker.emqx.io`, y el código empieza con `EEVE-` en vez de
+  `PIKA-` (el código le dice a tus amigos a qué servidor ir). Es un servicio gratuito de terceros: **puede estar caído
+  o lento un rato**; en ese caso pokewalk lo dice (`No pude conectarme al servidor de internet (broker.hivemq.com)...`)
+  y hay que probar más tarde. El de respaldo perdió mensajes en ráfagas en nuestras pruebas: anda, pero es "lo que
+  haya". Conectarse puede tardar hasta unos 10 s.
+- **Demora:** cada mensaje tarda **~0,3-0,4 s** en llegar (va y vuelve por el servidor, que está en Europa), así que
+  cada turno se ve un poquito después que en la red local. Los relojes del torneo (60 s) sobran.
+- **Caídas:** como no hay una conexión directa, cada compu manda un latido cada pocos segundos; **15 s sin noticias de
+  alguien = se desconectó** (pierde la pelea, como en la red local). Si se corta tu internet un momento, pokewalk
+  reintenta conectarse solo durante esos 15 s.
+- **Privacidad:** el código **no viaja**: de él salen el "canal" del servidor y una clave con la que **se firma cada
+  mensaje** (HMAC-SHA256); los mensajes sin firma, con otra clave o repetidos se descartan, así que nadie sin el código
+  puede meter jugadas ni hacerse pasar por la sala. Lo que **no** hay es cifrado: alguien mirando ese servidor público
+  podría **leer** lo que pasa en la partida (nombres, equipos, jugadas). No mandes nada privado por ahí. Adivinar un
+  código (40 bits al azar, con una derivación lenta a propósito) no es práctico; igual, cada sala tiene uno nuevo.
+- Entre los que tienen el código se confía como en la red local (es para jugar con amigos).
 
 ### Combates de gimnasio (`g`)
 

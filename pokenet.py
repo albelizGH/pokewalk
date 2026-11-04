@@ -16,6 +16,9 @@ Cómo funciona:
     arbitra todas las peleas (`MatchReferee`), las juegue o no, y todos los que no pelean las miran en vivo. El
     cuadro (eliminación simple, con byes) y los relojes los lleva `TourDirector`, también en su compu.
 
+  * Por internet: lo mismo, pero en vez de TCP directo los mensajes pasan por un servidor MQTT público
+    (`pokerelay`: la sala tiene un código, y `RelayLink` / `RelayRoom` hacen de `Link` / `RoomHost`).
+
 Protocolo: una línea de JSON por mensaje, sobre TCP. Nada de esto es seguro contra un rival tramposo
 (los equipos los arma cada uno): está pensado para jugar con amigos.
 """
@@ -35,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 
 import pokebattle as pb
+import pokerelay as pr
 
 PROTO = 2               # 2: salas de torneo (un pokewalk viejo no las entendería: ni las ve ni entra)
 TCP_PORT = 5757         # puerto de la sala (si está ocupado se usa otro, y el beacon avisa cuál)
@@ -664,6 +668,9 @@ class Versus:
         self.size = MAX_TEAM       # lo elige el anfitrión en la etapa "size" (el nivel lo pide pokewalk.py)
         self.level = pb.LEVEL      # el nivel que escribió, mientras elige legendarios / míticos (etapa "special")
         self.tourney = False       # la sala que se está creando es un torneo
+        self.relay = False         # por internet (pokerelay): sala con código en vez de IP
+        self._opened = None        # ("ok", RelayRoom) | ("fail", texto): resultado del hilo que abre la sala por internet
+        self._hello_msg, self._hello_at = None, 0.0     # saludo del invitado por internet (se repite si no contestan)
         self._handoff = None       # torneo que se le pasa a pokewalk.py en el próximo update()
         self.stage = "menu"
         self.room = self.finder = self.link = None
@@ -699,13 +706,21 @@ class Versus:
         if st == "menu":
             warn = "⚠ Sin permiso de Windows (salí y entrá de nuevo y aceptá el aviso) · " if self.noperm else ""
             return warn + ("Versus en la red local:   1 Crear sala   2 Buscar salas   3 Conectar por IP   "
-                           "4 Crear torneo      Esc cancela")
+                           "4 Crear torneo   5 Por internet      Esc cancela")
+        if st == "net":
+            return ("Por internet (con un código):   1 Crear sala   2 Crear torneo   3 Unirse con un código"
+                    "      0 volver   Esc cancela")
+        if st == "netopen":
+            return (f"Conectando con el servidor de internet ({pr.BROKERS[0][0]})...      Esc cancela")
         if st == "size":
-            what = "Nuevo torneo" if self.tourney else "Nueva sala"
+            what = self._what()
             return f"{what}: ¿de cuántos Pokémon los equipos?   1-{MAX_TEAM}      0 volver   Esc cancela"
         if st == "special":
             return ("¿Legendarios y míticos?   " + "   ".join(f"{k} {t}" for k, t in SPECIAL_OPTS)
                     + "      Enter = 1   0 volver   Esc cancela")
+        if st == "hosting" and self.relay:
+            return (f"Sala por internet · código {self.room.code} · {rules_text(self.rules)} · pasale el código a tu "
+                    "amigo y esperá...      Esc cierra la sala")
         if st == "hosting":
             where = ", ".join(self.room.ips) if self.room and self.room.ips else "esta compu"
             return (f"Sala «{self.name}» abierta ({where}) · {rules_text(self.rules)} · esperando a un amigo..."
@@ -742,15 +757,27 @@ class Versus:
                 title = "⚠ Sin permiso de Windows (salí y entrá de nuevo y aceptá el aviso) · " + title
             return {"title": title, "warn": self.noperm, "foot": "Esc cancela",
                     "items": [("1", "Crear sala"), ("2", "Buscar salas"), ("3", "Conectar por IP"),
-                              ("4", f"Crear torneo ({MIN_PLAYERS}-{MAX_PLAYERS} jugadores)")]}
+                              ("4", f"Crear torneo ({MIN_PLAYERS}-{MAX_PLAYERS} jugadores)"),
+                              ("5", "Por internet, con un código (amigos fuera de tu red)")]}
+        if st == "net":
+            return {"title": "Por internet: sin instalar nada (pasa por un servidor público gratuito)",
+                    "foot": "0  volver      Esc cancela",
+                    "items": [("1", "Crear sala (te doy un código para tu amigo)"),
+                              ("2", f"Crear torneo ({MIN_PLAYERS}-{MAX_PLAYERS} jugadores)"),
+                              ("3", "Unirse con un código")]}
         if st == "size":
-            what = "Nuevo torneo" if self.tourney else "Nueva sala"
+            what = self._what()
             return {"title": f"{what}: ¿de cuántos Pokémon los equipos?", "foot": "0  volver      Esc cancela",
                     "items": [(str(n), f"{n} Pokémon") for n in range(1, MAX_TEAM + 1)]}
         if st == "special":
-            what = "Nuevo torneo" if self.tourney else "Nueva sala"
+            what = self._what()
             return {"title": f"{what} · {self.size} Pokémon · nivel {self.level}: ¿legendarios y míticos?",
                     "foot": "Enter  1      0  volver      Esc cancela", "items": list(SPECIAL_OPTS)}
+        if st == "hosting" and self.relay:
+            return {"title": f"Sala por internet · código  {self.room.code}  · {rules_text(self.rules)}", "items": [],
+                    "warn": True,
+                    "foot": "Pasale el código a tu amigo: él entra con v → 5 → 3 «Unirse con un código»      "
+                            "Esc cierra la sala"}
         if st == "hosting":
             ips = ", ".join(self.room.ips) if self.room and self.room.ips else "la de esta compu"
             return {"title": f"Sala «{self.name}» abierta ({rules_text(self.rules)}) · esperando a un amigo...",
@@ -776,9 +803,19 @@ class Versus:
                 self.browse()
             elif ch in ("3", "i", "I"):
                 return "ip"
+            elif ch == "5":
+                self.stage = "net"
+        elif self.stage == "net":
+            if ch in ("1", "2"):
+                self.stage, self.tourney, self.relay = "size", ch == "2", True
+            elif ch == "3":
+                return "code"
+            elif ch == "0":
+                self.stage = "menu"
         elif self.stage == "size":
             if ch == "0":
-                self.stage, self.tourney = "menu", False
+                self.stage, self.tourney = ("net" if self.relay else "menu"), False
+                self.relay = False
             elif ch.isdigit() and 1 <= int(ch) <= MAX_TEAM:
                 self.size = int(ch)
                 return "level"
@@ -815,6 +852,11 @@ class Versus:
         legendarios / míticos). Si se eligió "Crear torneo", abre un `Tournament` con esas reglas y se lo pasa a
         pokewalk.py."""
         self.rules = room_rules({"size": size, "level": level, "legend": legend, "myth": myth})
+        if self.relay:                                 # por internet: conectar tarda (TLS), en un hilo
+            self.stage = "netopen"
+            threading.Thread(target=self._open_relay, args=("started" if self.tourney else "full",),
+                             daemon=True).start()
+            return
         if self.tourney:
             try:
                 self._handoff = Tournament(self.name, self.rules)
@@ -827,6 +869,42 @@ class Versus:
             self._fail = f"No pude abrir la sala: {e}"
             return
         self.role, self.stage = "host", "hosting"
+
+    def _what(self):
+        return ("Nuevo torneo" if self.tourney else "Nueva sala") + (" por internet" if self.relay else "")
+
+    def _open_relay(self, refuse):
+        try:
+            res = ("ok", pr.open_room(refuse))
+        except pr.RelayError as e:
+            res = ("fail", str(e))
+        with self._lock:
+            if self.closed and res[0] == "ok":
+                res[1].close()
+                return
+            self._opened = res
+
+    def join_code(self, text):
+        """Unirse por internet con el código que escribió (da igual mayúsculas y guiones). False si no es un
+        código válido (pokewalk.py se queda en el prompt)."""
+        code = pr.parse_code(text)
+        if not code:
+            return False
+        self.relay, self.role, self.stage = True, "guest", "connecting"
+        self.target = f"la sala {code} (por internet, {pr.BROKERS[pr.broker_of(code)][0]})"
+        threading.Thread(target=self._join_relay, args=(code,), daemon=True).start()
+        return True
+
+    def _join_relay(self, code):
+        try:
+            res = ("ok", pr.join(code))
+        except pr.RelayError as e:
+            res = ("fail", str(e))
+        with self._lock:
+            if self.closed and res[0] == "ok":
+                res[1].close()
+                return
+            self._conn = res
 
     def browse(self):
         self.finder = RoomFinder()
@@ -861,6 +939,8 @@ class Versus:
         hello = {"t": "hello", "v": PROTO, "name": self.name}
         if self.role == "host":                       # las reglas son de quien creó la sala
             hello["rules"] = self.rules
+        elif self.relay:                               # por internet, si se pierde, se repite (ver update)
+            self._hello_msg, self._hello_at = hello, time.time()
         link.send(hello)
 
     def set_team(self, fighters, sprites):
@@ -887,6 +967,15 @@ class Versus:
                 return None
             self.stage, self.noperm = "menu", res == "declined"
             return None
+        if self.stage == "netopen":
+            with self._lock:
+                res, self._opened = self._opened, None
+            if res and res[0] == "fail":
+                return ("error", res[1])
+            if res and self.tourney:
+                return ("tournament", Tournament(self.name, self.rules, room=res[1]))
+            if res:
+                self.room, self.role, self.stage = res[1], "host", "hosting"
         if self.stage == "hosting":
             self._triage()
         elif self.stage == "connecting":
@@ -894,10 +983,19 @@ class Versus:
                 res, self._conn = self._conn, None
             if res and res[0] == "ok":
                 self._linked(res[1])
+            elif res and res[0] == "fail":                 # por internet: el texto ya viene completo
+                return ("error", res[1])
             elif res:
                 return ("error", f"No pude conectar con {self.target}: {res[1]}")
         if not self.link:
             return None
+        if self.stage == "hello" and self._hello_msg and not self.link.heard:
+            if self.link.unanswered():
+                return ("error", f"Nadie contestó en {self.target}: revisá que el código esté bien escrito y que "
+                                 "la sala siga abierta (se cierra cuando el que la creó sale).")
+            if time.time() - self._hello_at > 3.0:      # por si el servidor perdió el saludo
+                self._hello_at = time.time()
+                self.link.send(self._hello_msg)
         event = None
         msgs = self.link.poll()
         for i, m in enumerate(msgs):
@@ -1196,7 +1294,8 @@ class Tournament(_TourLobby):
     `send(id, msg)` le manda algo a un jugador; `broadcast(msg)` a todos los invitados."""
     role = "host"
 
-    def __init__(self, name, rules=None):
+    def __init__(self, name, rules=None, room=None):
+        """`room` = una `pokerelay.RelayRoom` ya abierta si el torneo es por internet (si no, sala en la red local)."""
         self.name = self.org = name
         self.rules, self.me = room_rules(rules), 0
         self.players = [{"id": 0, "name": name}]
@@ -1205,13 +1304,18 @@ class Tournament(_TourLobby):
         self.stage = "lobby"
         self._pending = []         # conexiones entrantes que todavía no dijeron quiénes son
         self._next, self._out = 1, []
-        self.room = RoomHost(name, self.rules, backlog=MAX_PLAYERS, tour=self._tour())
+        self.code = getattr(room, "code", "")      # por internet: el código de la sala
+        self.room = room or RoomHost(name, self.rules, backlog=MAX_PLAYERS, tour=self._tour())
 
     def _tour(self):
         return {"n": len(self.players), "max": MAX_PLAYERS}
 
     def _foot(self):
         n = len(self.players)
+        if self.code:
+            code = f"Código {self.code} (entran con v → 5 → 3 «Unirse con un código»)"
+            go = f"Enter  empezar (mínimo {MIN_PLAYERS})" if n >= MIN_PLAYERS else f"Faltan {MIN_PLAYERS - n}"
+            return f"{code} · {go}      Esc  cancela el torneo"
         if n >= MIN_PLAYERS:
             return f"Enter  empezar (mínimo {MIN_PLAYERS})      Esc  cancela el torneo"
         ips = ", ".join(self.room.ips) if self.room and self.room.ips else "la de esta compu"

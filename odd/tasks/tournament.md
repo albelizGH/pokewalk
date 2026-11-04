@@ -37,7 +37,7 @@ participant watching the current match live.
   `is_legendary` / `is_mythical` in pokemon_species.csv), for versus and tournament: shown with the rules, typed
   disallowed Pokémon rejected in the prompt with a clear message, random fills respect them, Tab regional list marks
   them. Ultra Beasts / Paradox are not flagged by PokeAPI and stay allowed (told to the user). — route: delegated writer
-- [ ] T5 (after T3) Internet mode with nothing to install: relay through the public MQTT broker broker.hivemq.com
+- [x] T5 (after T3) Internet mode with nothing to install: relay through the public MQTT broker broker.hivemq.com
   (TLS 8883, stdlib-only minimal MQTT 3.1.1 client), fallback broker configured. Organizer gets a room code
   (e.g. `PIKA-7F3K-92QD`); topic derived from the code; every message HMAC-signed with a key derived from the code
   (no injection; readable by someone who guesses the code — accepted). Works for 1v1 and tournament (organizer stays
@@ -258,5 +258,63 @@ user's own command; branch push after that).
     Terminal; the main() wiring (`team_timeout`, `vspool`/`vserror` auto paths, director/key routing) beyond pyflakes;
     real sprite/PokeAPI downloads within the timers; real LAN.
 
+### T5 (internet mode, MQTT relay) — done, uncommitted at time of writing
+- Route: delegated writer (new pokerelay.py, pokenet.py, pokewalk.py, README.md). Size ~720 authored lines
+  (pokerelay ~560 new, pokenet +120/-6, pokewalk +9/-2, README +38/-2): over the 400 heuristic because the MQTT client,
+  the signed envelope/addressing layer and the Link-compatible transport only work together. Test-first exception: no
+  harness for the main loop; pure helpers checked by script, transport by real-broker smokes.
+- pokerelay.py (stdlib only): `BROKERS` = hivemq (prefix `PIKA`) then emqx (`EEVE`), TLS 8883. Code
+  `PIKA-XXXX-XXXX`: 8 chars of Crockford base32 (no I/L/O/U) = 40 bits from `secrets`; `parse_code` is
+  case-insensitive, ignores dashes/spaces, maps O->0 and I/L->1, no prefix = first broker; the prefix tells the guest
+  which broker the room is on. `derive(code)`: PBKDF2-SHA256 (200k rounds, ~0.25 s) -> topic `pokewalk/r1/<hex>` +
+  32-byte HMAC key (topic reveals neither code nor key). Envelope `{"f": sender, "s": seq, "b": [[to_list, msg], ...]}`
+  sealed as HMAC-SHA256(32 B) + JSON; bad signature / other code / seq <= last seen from that sender = dropped silently;
+  own echo ignored; a guest ignores everything until a message addressed to its own random id arrives (old host
+  broadcasts can't be replayed to a newcomer).
+  MQTT 3.1.1 minimal: CONNECT (clean session, keepalive 60) -> CONNACK check -> SUBSCRIBE QoS0 (sent after CONNACK) ->
+  PUBLISH QoS0, PINGREQ, DISCONNECT; length encoding/decoding and packet splitting on a buffer. One thread per
+  connection owns the socket (select + recv, no concurrent SSL read/write): reads, dispatches, flushes the send queue
+  at most every `GAP` 0.05 s as one batch (consecutive identical messages merged into one item with all recipients,
+  batches capped at 16 KB), heartbeat every `PING_EVERY` 4 s, own-echo liveness, reconnect to the same broker for up
+  to `DEAD_AFTER` 15 s; closes itself (flushing the last byes) when the room is closed and no link is left.
+  `RelayLink` = `pokenet.Link` interface (`q`, `send`, `poll`, `close(why)`, `alive`, `_closed`), 15 s without
+  messages = `_closed` (and the peer is told), `close` sends bye + `_closed` to the peer (TCP-close equivalent).
+  `RelayRoom` = `RoomHost` interface (`accept`, `set_tour`, `close`, `ips`) + `code`; host id is `"h"`, new ids are
+  accepted only on a `hello`; after close a new hello gets `bye` `full` (1v1) / `started` (tournament) like LAN.
+  Messages: largest is a 6-Pokémon team (~4.4 KB), a turn state ~0.8 KB.
+- pokenet: Versus menu `5 Por internet` -> stage `net` (`1 Crear sala`, `2 Crear torneo`, `3 Unirse con un código`
+  -> `"code"`); create reuses size -> level -> special, then `netopen` (thread `pr.open_room`) -> 1v1 `hosting` with
+  the code in title/foot, or `("tournament", Tournament(..., room=RelayRoom))`. `join_code(text)` (False = invalid)
+  -> thread `pr.join` -> the normal guest path (hello; handoff to `TournamentClient` when the reply has `tour`). The
+  relay guest repeats its hello every 3 s and gives up after `ANSWER_SECS` 12 s with "Nadie contestó en la sala ...".
+  `Tournament(name, rules, room=None)`, lobby foot shows the code. pokewalk: prompt `vscode` (invalid code stays in
+  the prompt with an error). LAN paths unchanged.
+- Evidence (2026-11-04):
+  - `py -m py_compile pokewalk.py pokenet.py pokebattle.py pokerelay.py`: exit 0; pyflakes on the four: exit 0, no output.
+  - `check_t5.py` (scratchpad, offline): exit 0, 163 checks — 3000 unique codes in format, alphabet 32 = 40 bits,
+    parsing variants and rejects, derivation determinism/independence, HMAC accept / tampered body / tampered sig /
+    wrong code, remaining length 0/127/128/16383/16384/2097151/2097152/268435455 (+ partial and out-of-range), publish
+    roundtrip incl. byte-chunked reads and QoS1 packet id, bus logic with fake sockets: pre-sync broadcast ignored,
+    accept on hello, replayed envelope dropped, batch merging, per-guest addressing, wrong-code and unsigned messages
+    ignored, refusal after close, close propagation, heartbeat timeout notifies the peer, own echo ignored, big batch split.
+  - `smoke_t5_vs.py` over broker.hivemq.com, 3/3 runs exit 0: menus -> room code; 3 forged hellos signed with another
+    code + 1 garbage publish on the room topic ignored; unknown code -> "Nadie contestó"; guest joins typing the code in
+    lowercase without dashes; handshake 2.3-8.4 s (incl. TLS connect); one-way latency median 298-309 ms, max 339 ms;
+    scripted 2v2 battle to the end in 3.7-4.5 s, mirror state == flipped host state, rematch offered; buses closed.
+  - `smoke_t5_tour.py` (T3 smoke with the relay; organizer via Versus menus, guests via code -> handoff), seeds 1-3:
+    3/3 exit 0, ~55 s each: 4 players to a champion with random team fill, 3-strike loss, a guest whose bus is killed
+    silently (heartbeat timeout 6 s in the test -> walkover), organizer turn timeouts; late joiner gets
+    "El torneo ya empezó."; all guests end with the organizer's bracket/champion; organizer close -> no errors, buses closed.
+  - `smoke_t5_fallback.py`: first broker unresolvable -> room opens on broker.emqx.io as `EEVE-...`, guest joins, 5/5
+    echoes; both down -> "No pude conectarme al servidor de internet (...)... Probé también con ... y tampoco..."; guest
+    with its broker down gets the same clear message. exit 0.
+  - Regression: check_t3, smoke_t3 (seed 1), smoke_t2, smoke_tour, check_rules, check_t4, check_t6: all exit 0.
+  - Observed: hivemq sometimes holds CONNACK ~7 s (seen in repeated test connects), so `CONNECT_TIMEOUT` is 15 s.
+  - Not verified: two real machines on different networks/NATs; on-screen rendering of the new menus, the code in the
+    hosting/lobby views and the `vscode` prompt; long sessions (reconnect path only reasoned, not forced); emqx under
+    a full tournament load.
+- Accepted limitation (README): messages are signed, not encrypted — anyone watching the public broker could read
+  the game traffic; injection needs the code. Participants holding the code are trusted (could spoof another id).
+
 ## Next step
-T5 (internet mode via MQTT relay).
+Delivery: commit T5, then push (user's decision, see Delivery).
