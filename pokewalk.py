@@ -36,6 +36,7 @@ import threading
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
+from array import array
 from concurrent.futures import ThreadPoolExecutor
 
 try:
@@ -190,6 +191,26 @@ BATTLE_ANIMS = {"a": ("Attack", "QuickStrike", "Strike", "Swing"), "s": ("Shoot"
                 "z": ("Sleep", "EventSleep")}
 
 
+def pack_pixels(rgba, pal, index):
+    """Píxeles RGBA (bytes, 4 por píxel) -> un índice por píxel en la paleta `pal` (`pal[0]` = None: transparente,
+    que es lo que tiene alfa < ALPHA_MIN). Ocupa 1 byte por píxel (2 si la paleta pasa de 255 colores), unas 20 veces
+    menos que una tupla por píxel. `index` = {(r, g, b): índice}, compartido por todos los cuadros de un sprite."""
+    words = array("I", rgba)
+    lut = {}
+    for v in set(words):
+        r, g, b, a = v.to_bytes(4, sys.byteorder)
+        if a < ALPHA_MIN:
+            lut[v] = 0
+            continue
+        c = (r, g, b)
+        if c not in index:
+            index[c] = len(pal)
+            pal.append(c)
+        lut[v] = index[c]
+    idx = list(map(lut.__getitem__, words))
+    return bytes(idx) if len(pal) <= 256 else array("H", idx)
+
+
 class Sprite:
     def __init__(self, dex, scale, battle=False):
         xml = ET.fromstring(fetch(SPRITE_URL.format(id=dex, file="AnimData.xml"), f"{dex:04d}/AnimData.xml"))
@@ -238,11 +259,13 @@ class Sprite:
         self.h = max(1, round(bh * scale))
         self.scale = scale
 
+        self.pal, index = [None], {}                 # colores de todos los cuadros (cada cuadro guarda índices)
+
         def prep(im):
             im = im.crop(box)
             if (self.w, self.h) != (bw, bh):
                 im = im.resize((self.w, self.h), Image.NEAREST if scale > 1 else Image.BOX)
-            return list(im.getdata()), im.width, im.height
+            return pack_pixels(im.tobytes(), self.pal, index), im.width, im.height, self.pal
 
         self.anims = {k: [prep(im) for im in v] for k, v in sets.items()}
         self.durs = {"w": walk[2], "i": idle[2]}
@@ -353,6 +376,7 @@ class Pet:
             self.frame_left += durs[self.frame]
 
     def pixels(self):
+        """(índices de color por píxel, ancho, alto, paleta) del cuadro actual (ver `pack_pixels`)."""
         return self.s.anims[self.state + ("r" if self.dir > 0 else "l")][self.frame]
 
 
@@ -365,21 +389,30 @@ class Loader:
         self.cache = {}
         self.done = queue.Queue()
         self.busy = 0
+        self.progress = None    # (cuántos van, total, nombre) de la última carga de varios, para "Cargando 23/151: …"
 
     def request(self, names, replace):
         self.busy += 1
+        self.progress = None
         threading.Thread(target=self._work, args=(names, replace), daemon=True).start()
 
     def _work(self, names, replace):
         ok, errors = [], []
-        for n in names:
+        many = len(names) > 1
+        for i, n in enumerate(names, 1):
             try:
+                if many:
+                    self.progress = (i, len(names), n)
                 dex, key = resolve(n)
+                if many:
+                    self.progress = (i, len(names), key)        # ya con el nombre (si escribió un número)
                 if dex not in self.cache:
                     self.cache[dex] = Sprite(dex, self.scale)
                 ok.append((key, self.cache[dex]))
             except Exception as e:  # red, nombre inválido, sprite faltante...
                 errors.append(f"{n}: {e}")
+        if many:
+            self.progress = None
         self.done.put((replace, ok, errors))
 
 
@@ -584,17 +617,16 @@ def render(pets, cols, rows, reserve=1):
     ph += ph % 2
     canvas = [[None] * cols for _ in range(ph)]
     for p in sorted(pets, key=lambda p: p.s.h, reverse=True):
-        data, w, h = p.pixels()
+        data, w, h, pal = p.pixels()
         ox, oy = int(p.x), max(0, ph - h - p.lift)
+        xs = range(max(0, -ox), min(w, cols - ox))        # solo las columnas que caen en pantalla
         for y in range(h):
             row = canvas[oy + y]
             base = y * w
-            for x in range(w):
-                cx = ox + x
-                if 0 <= cx < cols:
-                    r, g, b, a = data[base + x]
-                    if a >= ALPHA_MIN:
-                        row[cx] = (r, g, b)
+            for x in xs:
+                c = pal[data[base + x]]
+                if c:
+                    row[ox + x] = c
 
     lines = ph // 2
     avail = max(1, rows - reserve)           # arriba van las filas de texto (estado)
@@ -638,19 +670,18 @@ def render_sixel(pets, cols, rows, bg, cell_w=10, cell_h=20, reserve=1):
     # 1) componer: {(x, y): (r, g, b)}
     px = {}
     for p in sorted(pets, key=lambda p: p.s.h, reverse=True):
-        data, w, h = p.pixels()
+        data, w, h, pal = p.pixels()
         ox, oy = int(p.x), max(0, H - h - p.lift)
+        xs = range(max(0, -ox), min(w, W - ox))
         for y in range(h):
             yy = oy + y
             if yy < 0:
                 continue
             base = y * w
-            for x in range(w):
-                cx = ox + x
-                if 0 <= cx < W:
-                    r, g, b, a = data[base + x]
-                    if a >= ALPHA_MIN:
-                        px[(cx, yy)] = (r, g, b)
+            for x in xs:
+                c = pal[data[base + x]]
+                if c:
+                    px[(ox + x, yy)] = c
 
     # 2) paleta (índice 0 = fondo)
     colors = set(px.values())
@@ -758,6 +789,7 @@ DIM = "\x1b[90m"        # ayuda y datos secundarios (gris)
 GOOD = "\x1b[32m"       # elegido / listo / a favor (verde)
 BAD = "\x1b[31m"        # error / no se puede / último aviso (rojo)
 WARN = "\x1b[33m"       # aviso, lo que estás buscando, relojes, lo que se juega ahora (amarillo)
+CODE = "\x1b[1;7m"      # el código de una sala por internet: negrita en video inverso (resalta en cualquier tema)
 OK_MARK, NO_MARK = "✓", "✗"
 
 
@@ -782,9 +814,14 @@ def prompt_line(label, buf, cur, cols, style=HI):
     return f"\x1b[1;1H\x1b[2K{style}{label}:\x1b[0m {view}\x1b[0m"
 
 
-def status_line(text, cols, bright=False):
+def status_line(text, cols, bright=False, code=""):
+    """Línea de estado de una fila. `code` (el código de una sala por internet) va resaltado aparte si está."""
+    style = HI if bright else DIM
+    if code and code in text:
+        a, _, b = text.partition(code)
+        return "\x1b[1;1H\x1b[2K" + seg([(a, style), (code, CODE), (b, style)], max(1, cols - 1))
     text = text[:max(0, cols - 1)]
-    return f"\x1b[1;1H\x1b[2K{HI if bright else DIM}{text}\x1b[0m"
+    return f"\x1b[1;1H\x1b[2K{style}{text}\x1b[0m"
 
 
 # --------------------------------------------------------------------------- menús de varias líneas
@@ -864,6 +901,22 @@ def grid(title, items, foot, cols, rows_max, ncols=None):
     return out
 
 
+def room_block(v, cols, avail):
+    """Sala de versus o de torneo en cuadrícula, de su `view()` (None si no hay filas libres o la etapa no tiene
+    menú: entonces va su `text()`). Los menús del versus usan todos 3 columnas como máximo, así se ven parejos."""
+    if not v:
+        return None
+    items = [[(it[0], KEY), (" " + it[1], WARN)] if len(it) > 2 and it[2] else opt(it[0], it[1])
+             for it in v["items"]]                     # (tecla, texto[, resaltado]): la pelea en curso del cuadro
+    title = [(v["title"], WARN if v.get("warn") else HI)]
+    if v.get("code"):                                  # por internet: el código primero y aparte, para dictarlo
+        title = [("Código ", HI), (f" {v['code']} ", CODE), ("  · ", DIM)] + title
+    out = grid(title, items, hint_parts(v["foot"]), cols, avail, 3)
+    if out and v.get("code") and v["code"] not in out[0]:
+        return None                     # el título (con el código) no entró: la línea compacta, que empieza con él
+    return out
+
+
 def put_rows(lines, start=1, clear_to=0):
     """Escribe `lines` desde la fila `start` y deja limpias las filas hasta `clear_to` (restos de un menú más alto)."""
     last = max(start + len(lines) - 1, clear_to)
@@ -884,7 +937,7 @@ PET_LINES = ["<3", "¡Hola!", "¿Jugamos?", "¡Me encanta caminar!", "¡Qué lin
 
 def expand_ranges(parts):
     """`1-10 pikachu` -> ['1', ..., '10', 'pikachu'] (números de Pokédex; `ho-oh` sigue siendo un nombre y `10-1`
-    vale como `1-10`). Sin tope: cada Pokémon que camina ocupa unos pocos MB (ver el README)."""
+    vale como `1-10`). Sin tope: cada Pokémon que camina ocupa unos 0,2 MB (ver el README)."""
     out = []
     for term in parts:
         a, sep, b = term.partition("-")
@@ -1076,7 +1129,7 @@ class MovePicker:
         """Un ataque en la cuadrícula: número, * si está elegido, nombre (color del tipo), tipo y poder."""
         on = k in self.sel[self.i]
         return [(str(n), KEY), ("*" if on else " ", GOOD),
-                (m.name, rgb(TYPE_COLORS.get(m.type, (255, 255, 255))) + ("\x1b[1m" if on else "")),
+                (m.name, type_style(m.type) + ("\x1b[1m" if on else "")),
                 (f"  {pb.TYPES_ES[m.type][:3]} {m.power or 'estado'}", DIM)]
 
     def _per(self, cols):
@@ -1132,7 +1185,7 @@ class MovePicker:
         items = "  ".join(self._label(n + 1, k, self.pools[self.i][k]) for n, k in enumerate(pages[self.page]))
         last = self.i == len(self.fighters) - 1
         return (f"{f.name} Nv{f.level} ({self.i + 1}/{len(self.fighters)}) {len(self.sel[self.i])}/4 · {items} · "
-                f"pág {self.page + 1}/{len(pages)} ←→  Enter={'listo' if last else 'sigue'}  r=azar")
+                f"pág {self.page + 1}/{len(pages)} ←→  Enter {'listo' if last else 'sigue'}  r azar")
 
     def key(self, ch, cols):
         """Devuelve "done" al confirmar el último Pokémon."""
@@ -1476,7 +1529,7 @@ class DexList:
         """Qué se está viendo y qué hace Enter (o, recién elegido, qué se eligió y cuál es el paso siguiente)."""
         page = [(f"   pág. {self.page + 1}/{pages} ←→", DIM)] if pages > 1 else []
         if self.last is not None:                       # qué se eligió, el paso siguiente y después los avisos
-            return self.note[:1] + [("   Enter", KEY), (f": {DONE_VERB[self.mode]}", HI)] + self.note[1:] + page + \
+            return self.note[:1] + [("   Enter", KEY), (f" {DONE_VERB[self.mode]}", HI)] + self.note[1:] + page + \
                 [("   o escribí otro (número, nombre o rango)   ", DIM), ("Esc", KEY), (" vuelve al prompt", DIM)]
         note = self.note + [("   ", "")] if self.note else []
         if self.gen is None:
@@ -1508,7 +1561,7 @@ class DexList:
 
     def foot_parts(self):
         out = [("1-9", KEY), (" región   ", DIM)] if self.gen is None else [("Enter", KEY), (" elige   ", DIM)]
-        out += [("Enter solo", KEY), (f": {DONE_VERB[self.mode]}   ", DIM)]
+        out += [("Enter solo", KEY), (f" {DONE_VERB[self.mode]}   ", DIM)]
         if self.mode == "battle":
             out += [("Tab", KEY), (" ahora el rival   ", DIM)]
         out += [("Esc", KEY), (" vuelve al prompt   ", DIM)]
@@ -1573,7 +1626,7 @@ class DexList:
         count = len(mine) + len(rival or [])
         tail = [("  Esc", KEY), (" vuelve", DIM)]
         if self.last is not None:
-            return seg(self.note[:1] + [("  Enter", KEY), (f": {DONE_VERB[self.mode]}", HI)] + tail + self.note[1:]
+            return seg(self.note[:1] + [("  Enter", KEY), (f" {DONE_VERB[self.mode]}", HI)] + tail + self.note[1:]
                        + [("  · o escribí otro", DIM)], width)
         if self.gen is None:
             return seg(self.note + [("¿Región? ", HI)] + flat([opt(str(g), REGIONS[g - 1]) for g in sorted(self.gens)], "  ")
@@ -1615,7 +1668,7 @@ def lookup_info(term, jobs, walking=()):
     """Hilo: tipo y stats de un Pokémon (tecla i)."""
     try:
         dex, key = resolve(expand_name(term, walking))
-        jobs.put(("flash", "[Esc] " + pb.describe(fetch, dex, key), 12))
+        jobs.put(("flash", "Esc cierra · " + pb.describe(fetch, dex, key), 12))
     except Exception as e:
         jobs.put(("ierror", f"No pude: {term}: {e}", 6))
 
@@ -1627,6 +1680,21 @@ TYPE_COLORS = {
     "rock": (190, 170, 110), "ghost": (110, 80, 170), "dragon": (110, 60, 240), "dark": (90, 80, 90),
     "steel": (180, 190, 210), "fairy": (250, 160, 220),
 }
+# Los mismos tonos para el texto (nombre del ataque), oscurecidos o aclarados a una luminancia media: contraste de
+# al menos 3:1 tanto en fondo blanco como en negro (los de arriba, pálidos, casi no se leen en un tema claro).
+# El tipo igual va escrito al lado (`ele 90`): el color solo ayuda.
+TYPE_TEXT = {
+    "normal": (124, 124, 117), "fire": (186, 102, 29), "water": (61, 122, 221), "electric": (140, 124, 33),
+    "grass": (63, 139, 56), "ice": (80, 131, 140), "fighting": (218, 73, 52), "poison": (177, 83, 208),
+    "ground": (149, 120, 67), "flying": (112, 120, 176), "psychic": (203, 80, 128), "bug": (112, 131, 33),
+    "rock": (137, 123, 79), "ghost": (140, 101, 216), "dragon": (151, 83, 255), "dark": (134, 119, 134),
+    "steel": (117, 123, 136), "fairy": (163, 105, 144),
+}
+
+
+def type_style(t):
+    """Color de texto para un ataque de tipo `t` (legible en temas claros y oscuros; sin tipo conocido, el del tema)."""
+    return rgb(TYPE_TEXT[t]) if t in TYPE_TEXT else ""
 
 
 class Fx:
@@ -1650,8 +1718,8 @@ class Fx:
                     ax, ay = abs(dx), abs(dy)
                     on = (d <= r and (ax <= thick or ay <= thick or abs(ax - ay) <= thick)) or d <= r * 0.4
                     core = d <= r * 0.3
-                data.append((255, 255, 255, 255) if core and on else (*color, 255) if on else (0, 0, 0, 0))
-        self._px = (data, size, size)
+                data.append(1 if core and on else 2 if on else 0)
+        self._px = (bytes(data), size, size, [None, (255, 255, 255), tuple(color)])   # como Sprite: índices + paleta
 
     def pixels(self):
         return self._px
@@ -1809,15 +1877,15 @@ class BattleScene:
         """Texto de la pantalla final (con las opciones que haya)."""
         who = self.over_who
         if not (self.net and self.rematch_ok):
-            return who + "   Enter: volver"
+            return who + "   Enter volver"
         peer = self.net.peer
         if self.peer_gone:
-            return f"{who}   {peer} se fue.   Enter: volver"
+            return f"{who}   {peer} se fue.   Enter volver"
         if self.asked:
-            return f"{who}   Esperando a {peer}...   Enter: salir"
+            return f"{who}   Esperando a {peer}...   Enter salir"
         if self.peer_asked:
-            return f"{who}   ¡{peer} quiere revancha!   R: aceptar   Enter: salir"
-        return f"{who}   R: revancha   Enter: salir"
+            return f"{who}   ¡{peer} quiere revancha!   R aceptar   Enter salir"
+        return f"{who}   R revancha   Enter salir"
 
     def _finish(self):
         b = self.b
@@ -2014,9 +2082,9 @@ class BattleScene:
         if self.phase == "wait" and self.watch:
             return f"Mirando: {self.watch[0]} vs {self.watch[1]} · eligiendo..."
         if self.phase == "wait":
-            return "Esperando al rival...   (q: huir)"
+            return "Esperando al rival...   q huir"
         if self.phase == "main":
-            return f"¿Qué hará {me.name}?   1 Luchar   2 Pokémon   3 Huir" + ("" if self.net else "   (a: automático)")
+            return f"¿Qué hará {me.name}?   1 Luchar   2 Pokémon   3 Huir" + ("" if self.net else "   a automático")
         if self.phase == "fight":
             if not any(p > 0 for p in me.pp):
                 return "1 Forcejeo (sin PP)   0 volver"
@@ -2053,7 +2121,7 @@ class BattleScene:
                 e = b.chart.mult(m.type, foe.types) if m.power else 1
                 eff = [] if e == 1 else [(" x2", GOOD)] if e > 1 else [(" x½", BAD)] if e > 0 else [(" x0", BAD)]
                 pp = me.pp[i]
-                items.append([(str(i + 1), KEY), (" " + m.name, rgb(TYPE_COLORS.get(m.type, (255, 255, 255)))),
+                items.append([(str(i + 1), KEY), (" " + m.name, type_style(m.type)),
                               (f"  {pp}/{m.pp}", BAD if pp == 0 else WARN if pp <= 2 else DIM),
                               (f"  {pb.TYPES_ES[m.type][:3]} {m.power or 'estado'}", DIM)] + eff)
             return grid(None, items, back, cols, avail, 2)
@@ -2095,7 +2163,7 @@ class BattleScene:
         elif self.note_t > 0:
             lines = [seg([(self.note, HI)], width)]
         elif self.auto:
-            lines = [seg([("Piloto automático   (a: tomar el control   q: huir)", HI)], width)]
+            lines = [seg([("Piloto automático   a tomar el control   q huir", HI)], width)]
         else:
             lines = self._menu_cells(cols, avail) or [seg([(self.menu(), HI)], width)]
             if clock and len(lines) < avail:               # tu reloj, arriba del menú
@@ -2283,7 +2351,7 @@ def main():
                 f"{i + 1} {t['nombre']}" for i, t in enumerate(gym_trainers())) + "      0 volver"
         t = gym["t"]
         team = " · ".join(f"{p['nombre']} Nv{p['nivel']}" for p in t["equipo"])
-        return f"{t['nombre']} ({t['detalle']}): {team}      Enter: pelear   0 volver"
+        return f"{t['nombre']} ({t['detalle']}): {team}      Enter pelear   0 volver"
 
     def gym_block(avail):
         """Menú de combates en cuadrícula (None si no hay filas libres: se usa `gym_text`)."""
@@ -2306,15 +2374,6 @@ def main():
         return grid([(t["nombre"], WARN), (f"  {t['detalle']} · su equipo:", DIM)],
                     [[(p["nombre"], HI), (f" Nv{p['nivel']}", DIM)] for p in t["equipo"]],
                     [("Enter", KEY), (" pelear    ", DIM), ("0", KEY), (" volver", DIM)], cols, avail, 3)
-
-    def room_block(v, avail):
-        """Sala de versus o de torneo en cuadrícula, de su `view()` (None si no hay filas libres o la etapa no
-        tiene menú)."""
-        if not v:
-            return None
-        items = [[(it[0], KEY), (" " + it[1], WARN)] if len(it) > 2 and it[2] else opt(it[0], it[1])
-                 for it in v["items"]]                     # (tecla, texto[, resaltado]): la pelea en curso del cuadro
-        return grid([(v["title"], WARN if v.get("warn") else HI)], items, hint_parts(v["foot"]), cols, avail, 3)
 
     def idle_block(avail, talking):
         """Ayuda de teclas (dos filas agrupadas si hay lugar y ancho; si no, una sola con lo esencial)."""
@@ -2562,7 +2621,10 @@ def main():
                         mode, buf, prompt_err = again, last_input.get(again, ""), job[1].rsplit(": ", 1)[-1]
                         cur = len(buf)
 
-            # --- resultados de cargas
+            # --- resultados de cargas (mientras, el mensaje de "Cargando" dice cuántos van)
+            prog = loader.progress
+            if prog and msg.startswith("Cargando") and time.time() < msg_until:
+                flash("Cargando %d/%d: %s..." % prog, 30)
             while not loader.done.empty():
                 replace, ok, errors = loader.done.get()
                 loader.busy -= 1
@@ -2845,12 +2907,10 @@ def main():
                                    clock_style(left))], max(10, cols - 1))] + block
                 status = None if block else status_line(
                     (f"[{left} s] " if left is not None else "") + picker.text(cols), cols, True)
-            elif tour:
-                block = room_block(tour.view(), avail)
-                status = None if block else status_line(tour.text(), cols, True)
-            elif vs:
-                block = room_block(vs.view(), avail)
-                status = None if block else status_line(vs.text(), cols, True)
+            elif tour or vs:
+                v = (tour or vs).view()
+                block = room_block(v, cols, avail)
+                status = None if block else status_line((tour or vs).text(), cols, True, (v or {}).get("code", ""))
             elif time.time() < msg_until:
                 status = "\x1b[1;1H\x1b[2K" + seg([(msg, msg_style)], max(10, cols - 1))
             else:

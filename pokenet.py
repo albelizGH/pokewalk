@@ -719,9 +719,9 @@ class Versus:
             return f"{what}: ¿de cuántos Pokémon los equipos?   1-{MAX_TEAM}      0 volver   Esc cancela"
         if st == "special":
             return ("¿Legendarios y míticos?   " + "   ".join(f"{k} {t}" for k, t in SPECIAL_OPTS)
-                    + "      Enter = 1   0 volver   Esc cancela")
+                    + "      Enter 1   0 volver   Esc cancela")
         if st == "hosting" and self.relay:
-            return (f"Sala por internet · código {self.room.code} · {rules_text(self.rules)} · pasale el código a tu "
+            return (f"Código  {self.room.code}  · sala por internet · {rules_text(self.rules)} · pasale el código a tu "
                     "amigo y esperá...      Esc cierra la sala")
         if st == "hosting":
             where = ", ".join(self.room.ips) if self.room and self.room.ips else "esta compu"
@@ -729,12 +729,12 @@ class Versus:
                     "      Esc cierra la sala")
         if st == "browsing":
             if self.finder and self.finder.error:
-                return f"{self.finder.error}   ·   i = conectar por IP   0 volver   Esc cancela"
+                return f"{self.finder.error}   ·   i conectar por IP   0 volver   Esc cancela"
             rooms = self.finder.rooms() if self.finder else []
             if not rooms:
-                return "Buscando salas en la red...   (¿no aparece? i = escribí su IP)   0 volver   Esc cancela"
+                return "Buscando salas en la red...   ¿no aparece? i escribí su IP   0 volver   Esc cancela"
             return "Salas:  " + "   ".join(f"{i + 1} {room_label(r)}" for i, r in enumerate(rooms[:9])) + \
-                   "      i = por IP   0 volver   Esc cancela"
+                   "      i por IP   0 volver   Esc cancela"
         if st == "connecting":
             return f"Conectando con {self.target}...      Esc cancela"
         if st == "hello":
@@ -751,24 +751,28 @@ class Versus:
 
     def view(self):
         """El menú de la etapa actual como datos, para dibujarlo en varias filas: {"title", "items": [(tecla,
-        texto)], "foot", "warn"}. None si la etapa no tiene menú (se usa `text()`)."""
+        texto)], "foot", "warn", "code"} ("code": el código de la sala por internet, que se resalta aparte). None si
+        la etapa no tiene menú (se usa `text()`)."""
         st = self.stage
+        # Los menús del versus tienen opciones cortas (como mucho la del torneo) y lo que explica va en el título:
+        # así la cuadrícula reparte igual "En tu red" y "Por internet" (mismas columnas) en cualquier ancho.
         if st in ("menu", "lan"):
-            title = "Versus · ¿dónde juegan?" if st == "menu" else "En tu red (misma casa o mismo Wi-Fi)"
+            title = ("Versus · ¿dónde juegan? (por internet: amigos fuera de tu red)" if st == "menu" else
+                     "En tu red (misma casa o mismo Wi-Fi)")
             if self.noperm:
                 title = "⚠ Sin permiso de Windows (salí y entrá de nuevo y aceptá el aviso) · " + title
             if st == "menu":
                 return {"title": title, "warn": self.noperm, "foot": "Esc  cancela",
-                        "items": [("1", "En tu red (misma casa o mismo Wi-Fi)"),
-                                  ("2", "Por internet, con un código (amigos fuera de tu red)")]}
+                        "items": [("1", "En tu red (mismo Wi-Fi)"), ("2", "Por internet (con un código)")]}
             return {"title": title, "warn": self.noperm, "foot": "0  volver      Esc  cancela",
                     "items": [("1", "Crear sala"),
                               ("2", f"Crear torneo ({MIN_PLAYERS}-{MAX_PLAYERS} jugadores)"),
-                              ("3", "Buscar salas (si no aparece, ahí podés escribir la IP)")]}
+                              ("3", "Buscar salas o entrar por IP")]}
         if st == "net":
-            return {"title": "Por internet: sin instalar nada (pasa por un servidor público gratuito)",
+            return {"title": "Por internet, con un código (el que crea se lo pasa a sus amigos; sin instalar nada: "
+                             "pasa por un servidor público gratuito)",
                     "foot": "0  volver      Esc  cancela",
-                    "items": [("1", "Crear sala (te doy un código para tu amigo)"),
+                    "items": [("1", "Crear sala"),
                               ("2", f"Crear torneo ({MIN_PLAYERS}-{MAX_PLAYERS} jugadores)"),
                               ("3", "Unirse con un código")]}
         if st == "size":
@@ -780,8 +784,8 @@ class Versus:
             return {"title": f"{what} · {self.size} Pokémon · nivel {self.level}: ¿legendarios y míticos?",
                     "foot": "Enter  1      0  volver      Esc  cancela", "items": list(SPECIAL_OPTS)}
         if st == "hosting" and self.relay:
-            return {"title": f"Sala por internet · código  {self.room.code}  · {rules_text(self.rules)}", "items": [],
-                    "warn": True,
+            return {"title": f"Sala por internet · {rules_text(self.rules)} · esperando a tu amigo...", "items": [],
+                    "code": self.room.code,
                     "foot": "Pasale el código a tu amigo: él entra con v → 2 → 3 «Unirse con un código»      "
                             "Esc  cierra la sala"}
         if st == "hosting":
@@ -1275,7 +1279,7 @@ class _TourLobby:
                     title += f" · próxima pelea en {math.ceil(self.next_at - time.time())} s"
             return {"title": title, "foot": foot, "warn": warn, "items": self.bracket_items()}
         title = f"Torneo de {self.org} · {rules_text(self.rules)} · {n}/{self.max} jugadores"
-        return {"title": title, "foot": self._foot(),
+        return {"title": title, "foot": self._foot(), "code": getattr(self, "code", ""),
                 "items": [(str(i + 1), self._label(p)) for i, p in enumerate(self.players)]}
 
     def text(self):
@@ -1284,7 +1288,8 @@ class _TourLobby:
             if self.stage == "connecting":
                 return f"Conectando con {self.target}...      Esc cancela"
             return "Conectado, entrando al torneo...      Esc cancela"
-        return f"{v['title']}:  " + ", ".join(f"{it[0]}: {it[1]}" if len(it) > 2 else it[1] for it in v["items"]) \
+        code = f"Código  {v['code']}  · " if v.get("code") else ""
+        return f"{code}{v['title']}:  " + ", ".join(f"{it[0]}: {it[1]}" if len(it) > 2 else it[1] for it in v["items"]) \
             + f"      {v['foot']}"
 
     def key(self, ch):
@@ -1321,10 +1326,9 @@ class Tournament(_TourLobby):
 
     def _foot(self):
         n = len(self.players)
-        if self.code:
-            code = f"Código {self.code} (entran con v → 2 → 3 «Unirse con un código»)"
+        if self.code:                              # el código va aparte, resaltado (ver `view`)
             go = f"Enter  empezar (mínimo {MIN_PLAYERS})" if n >= MIN_PLAYERS else f"Faltan {MIN_PLAYERS - n}"
-            return f"{code} · {go}      Esc  cancela el torneo"
+            return f"Pasales el código: entran con v → 2 → 3 «Unirse con un código» · {go}      Esc  cancela el torneo"
         if n >= MIN_PLAYERS:
             return f"Enter  empezar (mínimo {MIN_PLAYERS})      Esc  cancela el torneo"
         ips = ", ".join(self.room.ips) if self.room and self.room.ips else "la de esta compu"

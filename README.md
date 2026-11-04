@@ -44,12 +44,15 @@ py install.py --keys alt+shift+k   # otro atajo
 
 Los nombres van en inglés (`charmander`, `bulbasaur`) o por número de Pokédex.
 
-No hay tope de cuántos agregar, pero cada Pokémon distinto que camina ocupa **unos 6 MB de memoria** (con `--scale 2`;
-el mismo Pokémon repetido no suma): 20 son ~120 MB, toda Kanto (`1-151`) ~900 MB. También tarda en bajar los sprites la
-primera vez (después quedan en caché).
+No hay tope de cuántos agregar: cada Pokémon distinto que camina ocupa **unos 0,2 MB de memoria** (con `--scale 2`;
+el mismo Pokémon repetido no suma): 20 son ~4 MB, toda Kanto (`1-151`) ~30 MB. Lo que sí tarda es bajar los sprites la
+primera vez (después quedan en caché): mientras tanto arriba dice cuántos van (`Cargando 23/151: chikorita...`) y al
+final `✓ Listo` (o `No pude: ...` con los que fallaron).
 
 Colores: las teclas van en cian, lo elegido en verde con `✓`, lo que no se puede en rojo con `✗` y los avisos y relojes
-en amarillo (en rojo los últimos 5 segundos). Usan los colores de tu tema, así que se leen en fondo claro u oscuro.
+en amarillo (en rojo los últimos 5 segundos). Usan los colores de tu tema, así que se leen en fondo claro u oscuro. Los
+nombres de los ataques van del color de su tipo, en tonos medios que se leen en los dos fondos, y el tipo igual va
+escrito al lado (`ele 90`).
 
 ## Reaccionan a tus comandos (solo PowerShell)
 
@@ -207,8 +210,8 @@ más ni tocar el router: los mensajes pasan por un servidor público y gratuito.
 
 1. El que crea aprieta **`v`** → **2 Por internet** → **1 Crear sala** o **2 Crear torneo**, y fija las reglas igual
    que en la red local (tamaño de los equipos, nivel, legendarios / míticos). Al rato (unos segundos: se conecta al
-   servidor) aparece **el código de la sala**, por ejemplo **`PIKA-7F3K-92QD`**: se lo pasás a tus amigos por
-   WhatsApp o lo que sea.
+   servidor) aparece **el código de la sala**, por ejemplo **`PIKA-7F3K-92QD`**, primero y resaltado (también en la
+   sala del torneo): se lo pasás a tus amigos por WhatsApp o lo que sea.
 2. Los demás aprietan **`v`** → **2 Por internet** → **3 Unirse con un código** y lo escriben. Da igual mayúsculas,
    minúsculas, guiones o espacios (`pika7f3k92qd` sirve), y la `O` vale como `0` y la `I` / `L` como `1`. Si el código
    está mal o la sala ya se cerró: `Nadie contestó en la sala ...`. Pokewalk se da cuenta solo de si es un 1 contra 1
