@@ -107,13 +107,22 @@ tenés estado); y cambia de Pokémon si el suyo casi no te hace daño y le pegá
 Los dos tienen que tener pokewalk (la misma versión) y estar en la misma red WiFi / LAN. No hace falta instalar nada más.
 
 1. Uno aprieta **`v`** y elige **1 Crear sala**, y fija **las reglas de la sala**: de cuántos Pokémon son los equipos
-   (`1`-`6`) y el nivel (1-100, Enter solo = 50). El otro aprieta **`v`** y elige **2 Buscar salas**: pokewalk prueba
+   (`1`-`6`), el nivel (1-100, Enter solo = 50) y si entran **legendarios** y **míticos** (`1` todos, `2` sin
+   legendarios, `3` sin míticos, `4` sin ninguno de los dos; Enter = todos). El otro aprieta **`v`** y elige **2 Buscar salas**: pokewalk prueba
    los equipos de tu red y la sala aparece sola en la lista, con sus reglas (también escucha los avisos UDP de las
    salas). La elige con su número. Si no aparece (por ejemplo en un Wi-Fi que aísla a los equipos entre sí), **3 / `i`
    Conectar por IP**: se escribe la IP que muestra el que creó la sala. Al entrar, los dos ven las reglas
-   (`Sala: 3 Pokémon · nivel 50`).
+   (`Sala: 3 Pokémon · nivel 50 · sin legendarios`).
+   - **Legendarios**: los de la historia, uno por juego (Mewtwo, Lugia, Rayquaza, Dialga...).
+   - **Míticos**: los de evento (Mew, Celebi, Jirachi, Arceus...).
+   Salen de PokeAPI (`is_legendary` / `is_mythical`). Los ultraentes y los Pokémon paradoja no vienen marcados ahí, así
+   que entran siempre. En la lista por región (Tab) los legendarios llevan `★` y los míticos `✦`; si la sala no los
+   deja, salen en gris.
 2. **Cada uno arma su equipo en la sala**: hasta el tamaño de la sala, solo nombres o números (`pika char`; el nivel lo
-   fija la sala, así que `pika:60` da error; Enter solo = los que caminan, hasta el tamaño de la sala). **Handicap**:
+   fija la sala, así que `pika:60` da error; Enter solo = los que caminan, hasta el tamaño de la sala; si no camina
+   ninguno, al azar entre los que la sala permite). Un legendario o mítico que la sala no deja da error y se corrige
+   ahí mismo (`Mewtwo es legendario: esta sala no los permite`), también si es uno de los que caminan. El que creó la
+   sala además rechaza un equipo que no cumpla las reglas. **Handicap**:
    cada Pokémon queda al nivel de la sala ±5 al azar (entre 1 y 100). A nivel 50, ±5 es ~10% de stats: se nota, pero
    no decide la pelea (con ±10 podría ser 40 contra 60, ~50% más). La revancha sigue con las mismas reglas.
    Después **elegís los ataques de cada uno** entre todos los que puede usar a su nivel (hasta 4):
@@ -145,7 +154,7 @@ Para jugar entre 3 y 8 en la misma red. Por ahora está **la sala del torneo**: 
 próxima versión.
 
 1. El organizador aprieta **`v`**, elige **4 Crear torneo** y fija las reglas como en una sala de versus (de cuántos
-   Pokémon son los equipos y el nivel).
+   Pokémon son los equipos, el nivel y si entran legendarios / míticos).
 2. Los demás aprietan **`v`** → **2 Buscar salas**: el torneo aparece aparte, con cuántos hay
    (`Torneo de Ana (192.168.1.5) · 3/8 · 3 Pokémon · nivel 50`). Se elige con su número. También se puede entrar con
    **3 Conectar por IP** (la IP del organizador): pokewalk se da cuenta solo de que es un torneo.

@@ -67,18 +67,51 @@ def _int(v, lo, hi):
 
 
 def room_rules(raw=None):
-    """Reglas de la sala, saneadas: {"size": 1..MAX_TEAM, "level": 1..100}. Lo que falte o venga roto queda
-    en lo de siempre (equipo de MAX_TEAM, nivel pb.LEVEL), para no caerse con un mensaje incompleto."""
+    """Reglas de la sala, saneadas: {"size": 1..MAX_TEAM, "level": 1..100, "legend": bool, "myth": bool}. Lo que
+    falte o venga roto queda en lo de siempre (equipo de MAX_TEAM, nivel pb.LEVEL, legendarios y míticos
+    permitidos), para no caerse con un mensaje incompleto (o de una versión que no los conoce)."""
     raw = raw if isinstance(raw, dict) else {}
     size = _int(raw["size"], 1, MAX_TEAM) if "size" in raw else MAX_TEAM
     level = _int(raw["level"], 1, 100) if "level" in raw else pb.LEVEL
-    return {"size": size, "level": level}
+    return {"size": size, "level": level, "legend": raw.get("legend") is not False,
+            "myth": raw.get("myth") is not False}
 
 
 def rules_text(rules):
-    """"3 Pokémon · nivel 50"."""
+    """"3 Pokémon · nivel 50", más " · sin legendarios" / " · sin míticos" si la sala no los deja."""
     r = room_rules(rules)
-    return f"{r['size']} Pokémon · nivel {r['level']}"
+    return (f"{r['size']} Pokémon · nivel {r['level']}" + ("" if r["legend"] else " · sin legendarios")
+            + ("" if r["myth"] else " · sin míticos"))
+
+
+# Legendarios (los de la historia, uno por juego) y míticos (de evento). `species_flags` lo pone pokewalk.py: una
+# función que devuelve {dex: "legend" | "myth"} (de pokemon_species.csv de PokeAPI). Sin ella no se marca ninguno.
+species_flags = None
+SPECIAL_ES = {"legend": "legendario", "myth": "mítico"}
+
+
+def special_kind(dex):
+    """"legend", "myth" o None para ese número de Pokédex."""
+    try:
+        return species_flags().get(dex) if species_flags else None
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def rule_problem(dex, name, rules):
+    """Texto de por qué ese Pokémon no entra en la sala ("Mewtwo es legendario: esta sala no los permite"), o
+    None si entra."""
+    kind = special_kind(dex)
+    if kind and not room_rules(rules)[kind]:
+        return f"{name} es {SPECIAL_ES[kind]}: esta sala no los permite"
+    return None
+
+
+def team_problem(team, rules):
+    """El primer problema de un equipo (lista de pb.Fighter) con las reglas de la sala, o None si está bien."""
+    if len(team) > room_rules(rules)["size"]:
+        return "más Pokémon que los de la sala"
+    return next((p for p in (rule_problem(f.dex, f.name, rules) for f in team) if p), None)
 
 
 def tour_info(raw):
@@ -586,9 +619,15 @@ class RoomFinder:
 
 
 # --------------------------------------------------------------------------- la sala: de conectarse a empezar
+# Etapa "special": legendarios / míticos, de una sola tecla. Tecla -> (legendarios, míticos) permitidos.
+SPECIAL_RULES = {"1": (True, True), "2": (False, True), "3": (True, False), "4": (False, False)}
+SPECIAL_OPTS = [("1", "Todos permitidos"), ("2", "Sin legendarios"), ("3", "Sin míticos"),
+                ("4", "Sin legendarios ni míticos")]
+
+
 class Versus:
     """Todo lo previo a la batalla. Etapas:
-        menu -> (size + nivel -> hosting | browsing | pidiendo IP) -> connecting -> hello -> team (armás tu
+        menu -> (size + nivel + special -> hosting | browsing | pidiendo IP) -> connecting -> hello -> team (armás tu
         equipo) -> loading -> waiting (el otro todavía no terminó) -> starting -> la batalla (la arma pokewalk.py).
     Las reglas de la sala (`rules`: tamaño del equipo y nivel) las elige quien la crea y viajan en su "hello":
     el invitado las tiene antes de armar su equipo.
@@ -608,6 +647,7 @@ class Versus:
         self.name, self.peer, self.role = name, peer, role
         self.rules = room_rules(rules)
         self.size = MAX_TEAM       # lo elige el anfitrión en la etapa "size" (el nivel lo pide pokewalk.py)
+        self.level = pb.LEVEL      # el nivel que escribió, mientras elige legendarios / míticos (etapa "special")
         self.tourney = False       # la sala que se está creando es un torneo
         self._handoff = None       # torneo que se le pasa a pokewalk.py en el próximo update()
         self.stage = "menu"
@@ -648,6 +688,9 @@ class Versus:
         if st == "size":
             what = "Nuevo torneo" if self.tourney else "Nueva sala"
             return f"{what}: ¿de cuántos Pokémon los equipos?   1-{MAX_TEAM}      0 volver   Esc cancela"
+        if st == "special":
+            return ("¿Legendarios y míticos?   " + "   ".join(f"{k} {t}" for k, t in SPECIAL_OPTS)
+                    + "      Enter = 1   0 volver   Esc cancela")
         if st == "hosting":
             where = ", ".join(self.room.ips) if self.room and self.room.ips else "esta compu"
             return (f"Sala «{self.name}» abierta ({where}) · {rules_text(self.rules)} · esperando a un amigo..."
@@ -689,6 +732,10 @@ class Versus:
             what = "Nuevo torneo" if self.tourney else "Nueva sala"
             return {"title": f"{what}: ¿de cuántos Pokémon los equipos?", "foot": "0  volver      Esc cancela",
                     "items": [(str(n), f"{n} Pokémon") for n in range(1, MAX_TEAM + 1)]}
+        if st == "special":
+            what = "Nuevo torneo" if self.tourney else "Nueva sala"
+            return {"title": f"{what} · {self.size} Pokémon · nivel {self.level}: ¿legendarios y míticos?",
+                    "foot": "Enter  1      0  volver      Esc cancela", "items": list(SPECIAL_OPTS)}
         if st == "hosting":
             ips = ", ".join(self.room.ips) if self.room and self.room.ips else "la de esta compu"
             return {"title": f"Sala «{self.name}» abierta ({rules_text(self.rules)}) · esperando a un amigo...",
@@ -720,6 +767,12 @@ class Versus:
             elif ch.isdigit() and 1 <= int(ch) <= MAX_TEAM:
                 self.size = int(ch)
                 return "level"
+        elif self.stage == "special":
+            if ch == "0":
+                self.stage = "size"
+            elif ch in ("\r", "\n") or ch in SPECIAL_RULES:
+                legend, myth = SPECIAL_RULES.get(ch, (True, True))
+                self.host(self.size, self.level, legend, myth)
         elif self.stage == "browsing":
             if ch in ("i", "I"):
                 return "ip"
@@ -738,10 +791,15 @@ class Versus:
         return None
 
     # --- pasos
-    def host(self, size=MAX_TEAM, level=pb.LEVEL):
-        """Abre la sala con estas reglas (equipos de hasta `size`, todos al nivel `level` ± el handicap).
-        Si se eligió "Crear torneo", abre un `Tournament` con esas reglas y se lo pasa a pokewalk.py."""
-        self.rules = room_rules({"size": size, "level": level})
+    def ask_special(self, level):
+        """Ya está el nivel (lo pidió pokewalk.py): falta elegir si entran legendarios y míticos."""
+        self.level, self.stage = level, "special"
+
+    def host(self, size=MAX_TEAM, level=pb.LEVEL, legend=True, myth=True):
+        """Abre la sala con estas reglas (equipos de hasta `size`, todos al nivel `level` ± el handicap; con o sin
+        legendarios / míticos). Si se eligió "Crear torneo", abre un `Tournament` con esas reglas y se lo pasa a
+        pokewalk.py."""
+        self.rules = room_rules({"size": size, "level": level, "legend": legend, "myth": myth})
         if self.tourney:
             try:
                 self._handoff = Tournament(self.name, self.rules)
@@ -845,8 +903,8 @@ class Versus:
             elif t == "team":
                 try:
                     foe = team_from_wire(m["fighters"])
-                    if len(m["fighters"]) > self.rules["size"]:
-                        raise ValueError("más Pokémon que los de la sala")
+                    if len(m["fighters"]) > self.rules["size"] or team_problem(foe, self.rules):
+                        raise ValueError("no cumple las reglas de la sala")   # un cliente tocado se salta el chequeo
                     self.foe = foe
                 except (KeyError, TypeError, ValueError, AttributeError):
                     return ("error", f"{who} mandó un equipo inválido.")

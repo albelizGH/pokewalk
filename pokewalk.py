@@ -103,6 +103,38 @@ def resolve(name):
     return _species[key], key
 
 
+_flags = None
+
+
+def parse_species_flags(raw):
+    """pokemon_species.csv -> {dex: "legend" | "myth"} solo de los marcados (`is_legendary` / `is_mythical`).
+    Ultraentes y paradojas no vienen marcados en PokeAPI: quedan como uno más."""
+    out = {}
+    for r in csv.DictReader(io.StringIO(raw)):
+        if r.get("is_mythical") == "1":
+            out[int(r["id"])] = "myth"
+        elif r.get("is_legendary") == "1":
+            out[int(r["id"])] = "legend"
+    return out
+
+
+def species_flags():
+    """Legendarios y míticos por número de Pokédex (se arma una vez, del csv en cache)."""
+    global _flags
+    if _flags is None:
+        _flags = parse_species_flags(fetch(SPECIES_URL, "species.csv").decode("utf-8"))
+    return _flags
+
+
+pn.species_flags = species_flags     # para que la sala valide el equipo que le llega
+
+
+def random_allowed(n, rules=None, top=493):
+    """`n` números de Pokédex al azar (1..top, sin repetir) que entran en las reglas de la sala, como texto."""
+    pool = [d for d in range(1, top + 1) if not pn.rule_problem(d, "", rules)]
+    return [str(d) for d in random.sample(pool, min(n, len(pool)))]
+
+
 def load_saved():
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
@@ -906,10 +938,11 @@ def prepare_gym_battle(trainer, mine, loader, jobs):
 VS_HANDICAP = 5     # ± niveles al azar en el versus: a nivel 50 son ~10% de stats (se nota, pero no decide)
 
 
-def parse_vs_team(parts, walking, size):
+def parse_vs_team(parts, walking, size, rules=None):
     """Versus: los nombres de tu equipo según la sala (nunca más de `size`). Solo nombres o números: el nivel lo
     fija la sala, así que `pika:60` es un error. Sin nada, los que caminan (hasta `size`); si no camina ninguno,
-    `size` al azar. ValueError con un texto para mostrar si algo no va."""
+    `size` al azar (de los que la sala permite). Un legendario o mítico que la sala no deja (escrito o de los que
+    caminan) es un error: se avisa en vez de sacarlo callado. ValueError con un texto para mostrar si algo no va."""
     for term in parts:
         if ":" in term:
             name = term.partition(":")[0] or "pika"
@@ -917,7 +950,17 @@ def parse_vs_team(parts, walking, size):
     if len(parts) > size:
         raise ValueError(f"En esta sala los equipos son de hasta {size} Pokémon (escribiste {len(parts)})")
     names = list(parts) or list(walking)[:size]
-    return names or [str(random.randint(1, 493)) for _ in range(size)]
+    for n in names:
+        try:
+            dex, key = resolve(expand_name(n, walking))
+        except OSError:                 # sin la lista no se puede revisar: el equipo lo arma igual (o falla) después
+            continue
+        except ValueError:
+            raise ValueError(f"No conozco a '{n}'") from None
+        problem = pn.rule_problem(dex, pb.pretty(key), rules)
+        if problem:
+            raise ValueError(problem + ("" if parts else " (camina con vos: escribí tu equipo)"))
+    return names or random_allowed(size, rules)
 
 
 def room_level(text):
@@ -1814,12 +1857,21 @@ def main():
         page = max(0, min(dex["page"], pages - 1))
         return found[page * DEX_PAGE:(page + 1) * DEX_PAGE], page, pages, len(found)
 
+    def dex_rules():
+        """Reglas de la sala si la lista se abrió desde el equipo del versus (para atenuar lo que no entra)."""
+        return vs.rules if mode == "vsteam" and vs else None
+
+    def dex_mark(i):
+        """" ★" legendario, " ✦" mítico, "" el resto."""
+        return {"legend": " ★", "myth": " ✦"}.get(pn.special_kind(i), "")
+
     def dex_text():
         if dex["gen"] is None:
             return "Elegir de:  " + "   ".join(f"{g} {REGIONS[g - 1]}" for g in sorted(dex_names)) + "      Esc vuelve"
         shown, page, pages, _ = dex_page()
         return (f"{REGIONS[dex['gen'] - 1]} {page + 1}/{pages}{' [' + dex['q'] + ']' if dex['q'] else ''}:  "
-                + "   ".join(f"#{i} {n}" for i, n in shown) + "      número o nombre + Enter   ←→ página")
+                + "   ".join(f"#{i} {n}{dex_mark(i)}" for i, n in shown)
+                + "      número o nombre + Enter   ←→ página   ★ legendario ✦ mítico")
 
     def dex_block(avail):
         """Lista por región en cuadrícula (None si no hay filas libres: se usa `dex_text`)."""
@@ -1831,9 +1883,14 @@ def main():
         title = [(f"{REGIONS[dex['gen'] - 1]} · {total} Pokémon", HI), (f"   página {page + 1}/{pages}", DIM)]
         if dex["q"]:
             title += [("   buscando: ", DIM), (dex["q"], WARN)]
+        rules = dex_rules()
         foot = [("número o nombre", KEY), (" + Enter elige    ", DIM), ("←→", KEY), (" página    ", DIM),
-                ("Backspace", KEY), (" regiones    ", DIM), ("Esc", KEY), (" vuelve", DIM)]
-        items = [opt(f"#{i}", n) for i, n in shown] or [[("(ninguno coincide)", DIM)]]
+                ("Backspace", KEY), (" regiones    ", DIM), ("Esc", KEY), (" vuelve    ", DIM),
+                ("★", WARN), (" legendario  ", DIM), ("✦", WARN), (" mítico", DIM)]
+        if rules and not (rules["legend"] and rules["myth"]):
+            foot += [("   (gris = la sala no lo permite)", DIM)]
+        items = [[(f"#{i}", KEY), (" " + n, DIM if pn.rule_problem(i, n, rules) else HI), (dex_mark(i), WARN)]
+                 for i, n in shown] or [[("(ninguno coincide)", DIM)]]
         return grid(title, items, foot, cols, avail, 3)
 
     def dex_key(ch):
@@ -2095,7 +2152,7 @@ def main():
                             elif vs:
                                 walking = [p.name for p in pets]
                                 try:
-                                    names = parse_vs_team(parts, walking, vs.rules["size"])
+                                    names = parse_vs_team(parts, walking, vs.rules["size"], vs.rules)
                                 except ValueError as e:             # se queda en el prompt para corregir
                                     prompt_err = str(e)
                                     continue
@@ -2109,7 +2166,7 @@ def main():
                                 prompt_err = "El nivel de la sala va de 1 a 100"
                                 continue
                             if vs:
-                                vs.host(vs.size, level)
+                                vs.ask_special(level)       # falta: ¿legendarios y míticos?
                         elif mode == "vsip":
                             vs_connect(buf)
                         elif parts:
