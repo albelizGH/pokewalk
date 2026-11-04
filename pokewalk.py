@@ -1608,7 +1608,8 @@ def main():
     dex = None             # elegir por región (a + Enter solo): {"gen": None | 1..9, "q": filtro, "page": n}
     dex_names = None       # generación -> nombres (se carga la primera vez que se abre)
     vs = None              # sala de versus en red (tecla v): pokenet.Versus
-    picker = None          # elegir ataques del equipo de versus: MovePicker
+    tour = None            # torneo (se crea o se entra desde el versus): pokenet.Tournament | TournamentClient
+    picker = None         # elegir ataques del equipo de versus: MovePicker
     w = sys.stdout.write
     w("\x1b[?1049h\x1b[?25l\x1b[2J")
 
@@ -1617,6 +1618,8 @@ def main():
             scene.net.close()
         if vs:
             vs.close()
+        if tour:
+            tour.close()
         try:
             os.remove(ALIVE_FILE)
         except OSError:
@@ -1750,9 +1753,9 @@ def main():
                     [[(p["nombre"], HI), (f" Nv{p['nivel']}", DIM)] for p in t["equipo"]],
                     [("Enter", KEY), (" pelear    ", DIM), ("0", KEY), (" volver", DIM)], cols, avail, 3)
 
-    def vs_block(avail):
-        """Sala de versus en cuadrícula (None si no hay filas libres o la etapa no tiene menú)."""
-        v = vs.view()
+    def room_block(v, avail):
+        """Sala de versus o de torneo en cuadrícula, de su `view()` (None si no hay filas libres o la etapa no
+        tiene menú)."""
         if not v:
             return None
         return grid([(v["title"], WARN if v.get("warn") else HI)], [opt(k, label) for k, label in v["items"]],
@@ -1899,6 +1902,15 @@ def main():
         if text:
             flash(text, secs)
 
+    def close_tour(text="", secs=5):
+        """Sale del torneo (el organizador lo cierra para todos)."""
+        nonlocal tour
+        if tour:
+            tour.close()
+        tour = None
+        if text:
+            flash(text, secs)
+
     def vs_connect(text):
         """Tecla v -> 3: `ip` o `ip:puerto`."""
         host, _, port = text.strip().partition(":")
@@ -2000,8 +2012,17 @@ def main():
                     mode, buf, cur, prompt_err = "vsteam", "", 0, ""
                 elif ev and ev[0] == "ready":
                     threading.Thread(target=prepare_versus, args=(vs, loader, jobs), daemon=True).start()
+                elif ev and ev[0] == "tournament":             # se creó o se entró a un torneo: sigue él
+                    tour = ev[1]
+                    close_vs()
                 elif ev and ev[0] == "error":
                     close_vs(ev[1], 6)
+            # --- torneo (por ahora, la sala: quién está y empezar)
+            if tour:
+                for ev in tour.update():
+                    if ev[0] == "error":
+                        close_tour(ev[1], 6)
+                        break
             # --- teclado
             typed = keys.read()
             if typed:
@@ -2019,6 +2040,10 @@ def main():
                     elif picker.key(ch, cols) == "done":
                         vs.set_team(picker.fighters, vs.my_sprites)
                         picker = None
+                    continue
+                if tour and not mode:
+                    if tour.key(ch) == "cancel":
+                        close_tour("Saliste del torneo", 2)
                     continue
                 if vs and not mode:
                     act = vs.key(ch)
@@ -2186,8 +2211,11 @@ def main():
             elif picker:
                 block = picker.lines(cols, avail)
                 status = None if block else status_line(picker.text(cols), cols, True)
+            elif tour:
+                block = room_block(tour.view(), avail)
+                status = None if block else status_line(tour.text(), cols, True)
             elif vs:
-                block = vs_block(avail)
+                block = room_block(vs.view(), avail)
                 status = None if block else status_line(vs.text(), cols, True)
             elif time.time() < msg_until:
                 status = status_line(msg, cols, True)

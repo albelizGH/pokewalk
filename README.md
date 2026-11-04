@@ -65,7 +65,7 @@ El hook envuelve `prompt` sin alterar `$?` ni `$LASTEXITCODE`, así que convive 
 | Tecla | Qué hace |
 |---|---|
 | `b` | **batalla** por equipos (abajo): `pika char` = 1 contra 1, `pika char vs mew snor` = equipos de hasta 6, Enter solo = 3 contra 3 al azar |
-| `v` | **versus contra un amigo** en la misma red (abajo, "Versus contra un amigo") |
+| `v` | **versus contra un amigo** en la misma red (abajo, "Versus contra un amigo"), o un **torneo** de 3 a 8 (abajo, "Torneo") |
 | `g` | **combates de gimnasio** (abajo): líderes, Alto Mando y campeón de Kanto y Johto |
 | `i` | **info**: tipo, stats base, altura y peso de un Pokémon (Enter solo = uno que camina) |
 | `h` | **mimar**: escribís a quién (nombre, número o el principio: `pika`; varios con espacio) y se alegra y te dice algo. Enter solo = uno al azar |
@@ -138,6 +138,24 @@ cada uno, así que nada impide hacer trampa a propósito.
 
 Si es la primera vez, el firewall de Windows va a preguntar si dejás a Python usar la red: aceptá en **redes privadas**.
 La sala usa el puerto TCP 5757 y los avisos van por UDP 5758.
+
+### Torneo en la misma red (`v` → 4)
+
+Para jugar entre 3 y 8 en la misma red. Por ahora está **la sala del torneo**: el cuadro y las peleas llegan en la
+próxima versión.
+
+1. El organizador aprieta **`v`**, elige **4 Crear torneo** y fija las reglas como en una sala de versus (de cuántos
+   Pokémon son los equipos y el nivel).
+2. Los demás aprietan **`v`** → **2 Buscar salas**: el torneo aparece aparte, con cuántos hay
+   (`Torneo de Ana (192.168.1.5) · 3/8 · 3 Pokémon · nivel 50`). Se elige con su número. También se puede entrar con
+   **3 Conectar por IP** (la IP del organizador): pokewalk se da cuenta solo de que es un torneo.
+3. En la sala todos ven la lista de jugadores y las reglas. Si alguien se va o se le corta la conexión, sale de la lista.
+   Esc sale del torneo (si es el organizador, lo cierra para todos).
+4. Con 3 o más, el organizador aprieta **Enter** para empezar: la sala se cierra (ya no entra nadie más) y todos
+   reciben la lista final de jugadores.
+
+Todos se conectan solo a la compu del organizador, así que tiene que poder recibir conexiones (el mismo permiso de
+Windows que para crear una sala de versus). Hace falta la misma versión de pokewalk en todas las compus.
 
 ### Combates de gimnasio (`g`)
 
