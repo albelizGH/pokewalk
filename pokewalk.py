@@ -774,7 +774,7 @@ PROMPTS = {
     "battle": "Batalla (pika char = 1 vs 1;  pika char vs mew snor = equipos;  Enter solo = 3 vs 3 al azar;  Tab = lista, y en ella Tab = el rival)",
     "pet": "Mimar a (nombre, número o principio; Enter solo = uno al azar)",
     "info": "Info de (nombre, número o principio; Enter solo = uno que camina;  Tab = lista por región)",
-    "vsip": "IP del amigo (ej. 192.168.1.20; Esc vuelve)",
+    "vsip": "IP del amigo, como la muestra su sala (ej. 192.168.1.20 o 192.168.1.20:35757; Esc vuelve)",
     "vscode": "Código de la sala por internet (ej. PIKA-7F3K-92QD; da igual mayúsculas y guiones;  Esc vuelve)",
     "vslevel": "Nivel de la sala (1-100; cada Pokémon queda ±5 al azar; Enter solo = 50;  Esc vuelve)",
     "vsteam": "Conectado con {peer} · Sala: {rules}. Tu equipo (hasta {size}, solo nombres; Enter solo = los que caminan;  Tab = lista)",
@@ -2659,14 +2659,14 @@ def main():
         # cargando: cuando llegue ("vspool") se manda solo, con los ataques sorteados
 
     def vs_connect(text):
-        """Tecla v -> 2 Buscar salas -> i: `ip` o `ip:puerto`."""
+        """Tecla v -> 1 -> 3 Buscar salas -> i: `ip` (se prueban todos los puertos de sala) o `ip:puerto`."""
         host, _, port = text.strip().partition(":")
         try:
-            port = int(port) if port else pn.TCP_PORT
+            port = int(port) if port else None
         except ValueError:
             port = -1
-        if not host or not 0 < port < 65536:
-            flash("Escribí la IP del amigo (ej. 192.168.1.20)", 4, WARN)
+        if not host or not (port is None or 0 < port < 65536):
+            flash("Escribí la IP del amigo (ej. 192.168.1.20, o 192.168.1.20:35757 si su sala lo muestra así)", 4, WARN)
         elif vs:
             vs.connect(host, port)
 

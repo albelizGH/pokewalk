@@ -34,15 +34,21 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 
 import pokebattle as pb
 import pokerelay as pr
 
 PROTO = 2               # 2: salas de torneo (un pokewalk viejo no las entendería: ni las ve ni entra)
-TCP_PORT = 5757         # puerto de la sala (si está ocupado se usa otro, y el beacon avisa cuál)
-UDP_PORT = 5758         # puerto donde se anuncian las salas
+# Puertos de la sala, en orden de preferencia. Windows (Hyper-V / WSL / Docker) reserva rangos de puertos que cambian
+# al reiniciar, y el 5757 puede caer en uno: entonces la sala abre en el siguiente. Los de repuesto están entre 15001 y
+# 49151: fuera del rango dinámico de siempre (49152-65535) y del que dejan algunas instalaciones (1024-15000), que es
+# donde caen esas reservas. Si ninguno anda, uno cualquiera (la sala lo muestra como IP:puerto).
+TCP_PORTS = (5757, 35757, 45757)
+TCP_PORT = TCP_PORTS[0]
+UDP_PORTS = (5758, 35758, 45758)    # donde se anuncian las salas: se avisa a todos y se escucha en el primero libre
+UDP_PORT = UDP_PORTS[0]
 MAX_TEAM = 6
 MAX_PLAYERS = 8         # jugadores de un torneo, contando al organizador
 MIN_PLAYERS = 3         # para empezar un torneo
@@ -479,11 +485,17 @@ class RoomHost:
         """`tour` = {"n", "max"} si es una sala de torneo (el aviso lo lleva; se actualiza con `set_tour`)."""
         self.ips = local_ips()
         self.name, self.rules = name, room_rules(rules)
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            srv.bind(("", TCP_PORT))
-        except OSError:                              # ocupado (otro pokewalk en esta compu): uno libre
-            srv.bind(("", 0))
+        self.blocked = []                            # [(puerto, por qué)] los de sala que no se pudieron usar
+        for port in TCP_PORTS + (0,):                # 0: uno cualquiera (si Windows reservó todos los de sala)
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                srv.bind(("", port))
+                break
+            except OSError as e:                     # reservado por Windows, u ocupado (otro pokewalk en esta compu)
+                srv.close()
+                if not port:
+                    raise
+                self.blocked.append((port, "reservado por Windows" if isinstance(e, PermissionError) else "ocupado"))
         srv.listen(backlog)
         srv.setblocking(False)
         self.srv, self.port = srv, srv.getsockname()[1]
@@ -497,6 +509,22 @@ class RoomHost:
             info["tour"] = tour
         self.beacon = json.dumps(info).encode()      # el hilo del aviso toma el nuevo en la próxima vuelta
 
+    def where(self, none="la de esta compu"):
+        """Lo que hay que escribir para entrar por IP: «ip», o «ip:puerto» si la sala no está en el de siempre."""
+        suf = "" if self.port == TCP_PORT else f":{self.port}"
+        if not self.ips:
+            return none + (f" (puerto {self.port})" if suf else "")
+        return ", ".join(ip + suf for ip in self.ips)
+
+    def note(self):
+        """Por qué la sala no está en el puerto de siempre ("" si está): para mostrarlo en la sala."""
+        if not self.blocked:
+            return ""
+        if self.port in TCP_PORTS:
+            return ", ".join(f"el puerto {p} está {w}" for p, w in self.blocked) + f": uso el {self.port}"
+        return (f"⚠ Windows no deja usar los puertos de pokewalk ({', '.join(str(p) for p, _ in self.blocked)}): "
+                f"la sala quedó en el {self.port} y puede no aparecer al buscar; tu amigo tiene que escribir IP:puerto")
+
     def _announce(self):
         try:
             u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -506,10 +534,11 @@ class RoomHost:
         targets = ["255.255.255.255"] + [".".join(ip.split(".")[:3] + ["255"]) for ip in self.ips]
         while not self.stop.is_set():
             for t in targets:
-                try:
-                    u.sendto(self.beacon, (t, UDP_PORT))
-                except OSError:
-                    pass
+                for p in UDP_PORTS:                  # quien busca escucha en el primero que Windows le deje
+                    try:
+                        u.sendto(self.beacon, (t, p))
+                    except OSError:
+                        pass
             self.stop.wait(BEACON_EVERY)
         u.close()
 
@@ -555,9 +584,48 @@ def probe_room(ip, port=TCP_PORT):
     return None
 
 
+def _ports_text(ports):
+    ports = [str(p) for p in ports]
+    return ports[0] if len(ports) == 1 else ", ".join(ports[:-1]) + " y " + ports[-1]
+
+
+def _close_late(f):
+    if not f.cancelled() and f.exception() is None:
+        f.result().close()
+
+
+def dial(ip, port=None, timeout=5.0):
+    """Conexión con la sala en ip:port. Sin `port` prueba a la vez los puertos de sala (`TCP_PORTS`) y se queda con
+    el primero que atiende. Devuelve ("ok", socket, puerto) o ("err", por qué, para el jugador)."""
+    ports = [port] if port else list(TCP_PORTS)
+    ex = ThreadPoolExecutor(len(ports))
+    futs = {ex.submit(socket.create_connection, (ip, p), timeout): p for p in ports}
+    ex.shutdown(wait=False)
+    errs = []
+    for f in as_completed(futs):
+        try:
+            s = f.result()
+        except (OSError, ValueError) as e:
+            errs.append(e)
+            continue
+        for other in futs:                           # las que todavía no terminaron se cierran solas al terminar
+            if other is not f:
+                other.add_done_callback(_close_late)
+        return ("ok", s, futs[f])
+    if any(isinstance(e, socket.timeout) for e in errs):
+        return ("err", "no contesta. Puede que Windows le bloquee el puerto a quien creó la sala: en su pantalla "
+                       "figura la IP:puerto exacta para escribir (ej. 192.168.0.38:35757). Revisá también que sea la "
+                       "IP del Wi-Fi y que tenga la última versión de pokewalk: ahí se abre solo el permiso de Windows.")
+    if errs and all(isinstance(e, ConnectionRefusedError) for e in errs):
+        return ("err", f"no hay ninguna sala abierta ahí (probé {'el puerto' if port else 'los puertos'} "
+                       f"{_ports_text(ports)}). Escribí la IP:puerto tal cual figura en la pantalla de quien la creó.")
+    e = errs[0] if errs else OSError()
+    return ("err", str(e) or e.__class__.__name__)
+
+
 class RoomFinder:
     """Busca salas de dos maneras a la vez:
-      * escaneo: prueba conectarse al puerto de sala de cada equipo de tu subred (andá lo que andes con el
+      * escaneo: prueba conectarse a los puertos de sala de cada equipo de tu subred (andá lo que andes con el
         firewall, y no depende del broadcast, que muchas redes y firewalls bloquean);
       * avisos UDP de las salas, si el firewall deja recibirlos.
     `rooms()` = las que se vieron hace poco."""
@@ -569,26 +637,30 @@ class RoomFinder:
         self.stop = threading.Event()
         self._lock = threading.Lock()
         self.me = set(local_ips())
-        try:
+        for port in UDP_PORTS:  # las salas avisan en todos: se escucha en el primero que Windows no tenga reservado
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(("", UDP_PORT))
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("", port))
+            except OSError:
+                s.close()
+                continue
             s.settimeout(0.5)
             self.sock = s
             threading.Thread(target=self._listen, daemon=True).start()
-        except OSError:
-            pass                # sin UDP igual se busca por escaneo
+            break               # si no se pudo ninguno, igual se busca por escaneo
         threading.Thread(target=self._scan, daemon=True).start()
 
     def _scan(self):
         while not self.stop.is_set():
             nets = dict.fromkeys(".".join(ip.split(".")[:3]) for ip in self.me)
-            targets = [f"{n}.{i}" for n in nets for i in range(1, 255) if f"{n}.{i}" not in self.me]
-            with ThreadPoolExecutor(128) as ex:
-                for ip, res in zip(targets, ex.map(probe_room, targets)):
+            targets = [(f"{n}.{i}", p) for n in nets for i in range(1, 255) if f"{n}.{i}" not in self.me
+                       for p in TCP_PORTS]
+            with ThreadPoolExecutor(256) as ex:     # todos los puertos de sala de cada equipo, a la vez
+                for (ip, port), res in zip(targets, ex.map(lambda t: probe_room(*t), targets)):
                     if res:
                         with self._lock:
-                            self.found[(ip, TCP_PORT)] = (res[0], time.time(), True, res[1], res[2])
+                            self.found[(ip, port)] = (res[0], time.time(), True, res[1], res[2])
             self.stop.wait(SCAN_EVERY)
 
     def _listen(self):
@@ -724,8 +796,9 @@ class Versus:
             return (f"Código  {self.room.code}  · sala por internet · {rules_text(self.rules)} · pasale el código a tu "
                     "amigo y esperá...      Esc cierra la sala")
         if st == "hosting":
-            where = ", ".join(self.room.ips) if self.room and self.room.ips else "esta compu"
-            return (f"Sala «{self.name}» abierta ({where}) · {rules_text(self.rules)} · esperando a un amigo..."
+            where = self.room.where("esta compu") if self.room else "esta compu"
+            note = f" · {self.room.note()}" if self.room and self.room.note() else ""
+            return (f"Sala «{self.name}» abierta ({where}) · {rules_text(self.rules)} · esperando a un amigo...{note}"
                     "      Esc cierra la sala")
         if st == "browsing":
             if self.finder and self.finder.error:
@@ -789,10 +862,15 @@ class Versus:
                     "foot": "Pasale el código a tu amigo: él entra con v → 2 → 3 «Unirse con un código»      "
                             "Esc  cierra la sala"}
         if st == "hosting":
-            ips = ", ".join(self.room.ips) if self.room and self.room.ips else "la de esta compu"
-            return {"title": f"Sala «{self.name}» abierta ({rules_text(self.rules)}) · esperando a un amigo...",
-                    "items": [],
-                    "foot": f"Tu amigo la ve en «Buscar salas», o conecta por IP a {ips}      Esc  cierra la sala"}
+            ips = self.room.where() if self.room else "la de esta compu"
+            note = self.room.note() if self.room else ""
+            title, warn = f"Sala «{self.name}» abierta ({rules_text(self.rules)}) · esperando a un amigo...", False
+            how = f"Tu amigo la ve en «Buscar salas», o conecta por IP a {ips}"
+            if note.startswith("⚠"):                  # puerto cualquiera: el escaneo no la ve, va primero y resaltado
+                title, warn, how = f"{note} · {title}", True, f"Tu amigo entra con i en «Buscar salas» y escribe {ips}"
+            elif note:
+                title += f" ({note})"
+            return {"title": title, "warn": warn, "items": [], "foot": f"{how}      Esc  cierra la sala"}
         if st == "browsing":
             rooms = self.finder.rooms()[:9] if self.finder else []
             foot = "¿No aparece la sala?  i  escribí su IP      0  volver      Esc  cancela"
@@ -923,19 +1001,17 @@ class Versus:
         self.finder = RoomFinder()
         self.stage = "browsing"
 
-    def connect(self, ip, port=TCP_PORT):
+    def connect(self, ip, port=None):
+        """Sin `port` (escribió solo la IP) se prueban todos los puertos de sala."""
         self._stop_finder()
-        self.role, self.stage, self.target = "guest", "connecting", f"{ip}:{port}"
+        self.role, self.stage, self.target = "guest", "connecting", f"{ip}:{port}" if port else ip
         threading.Thread(target=self._connect, args=(ip, port), daemon=True).start()
 
     def _connect(self, ip, port):
-        try:
-            res = ("ok", Link(socket.create_connection((ip, port), timeout=5)))
-        except socket.timeout:
-            res = ("err", "no contesta. Revisá que sea la IP de la sala (la del Wi-Fi) y que el otro tenga la "
-                          "última versión de pokewalk: ahí se abre solo el permiso de Windows.")
-        except (OSError, ValueError) as e:
-            res = ("err", str(e) or e.__class__.__name__)
+        res = dial(ip, port)
+        if res[0] == "ok":
+            self.target = f"{ip}:{res[2]}"            # el puerto en el que la encontró (para los mensajes)
+            res = ("ok", Link(res[1]))
         with self._lock:
             if self.closed and res[0] == "ok":
                 res[1].close()
@@ -1329,10 +1405,12 @@ class Tournament(_TourLobby):
         if self.code:                              # el código va aparte, resaltado (ver `view`)
             go = f"Enter  empezar (mínimo {MIN_PLAYERS})" if n >= MIN_PLAYERS else f"Faltan {MIN_PLAYERS - n}"
             return f"Pasales el código: entran con v → 2 → 3 «Unirse con un código» · {go}      Esc  cancela el torneo"
+        ips = self.room.where() if self.room else "la de esta compu"
         if n >= MIN_PLAYERS:
-            return f"Enter  empezar (mínimo {MIN_PLAYERS})      Esc  cancela el torneo"
-        ips = ", ".join(self.room.ips) if self.room and self.room.ips else "la de esta compu"
-        return (f"Faltan {MIN_PLAYERS - n} para empezar · entran con «Buscar salas» o por IP a {ips}"
+            more = f" · entran más por IP a {ips}" if self.room and self.room.port != TCP_PORT and n < self.max else ""
+            return f"Enter  empezar (mínimo {MIN_PLAYERS}){more}      Esc  cancela el torneo"
+        note = f" · {self.room.note()}" if self.room and self.room.note() else ""
+        return (f"Faltan {MIN_PLAYERS - n} para empezar · entran con «Buscar salas» o por IP a {ips}{note}"
                 "      Esc  cancela el torneo")
 
     def _foot_started(self):
@@ -1494,10 +1572,9 @@ class TournamentClient(_TourLobby):
             threading.Thread(target=self._connect, args=(ip, port), daemon=True).start()
 
     def _connect(self, ip, port):
-        try:
-            res = ("ok", Link(socket.create_connection((ip, port), timeout=5)))
-        except (OSError, ValueError) as e:
-            res = ("err", str(e) or e.__class__.__name__)
+        res = dial(ip, port)
+        if res[0] == "ok":
+            res = ("ok", Link(res[1]))
         with self._lock:
             if self.closed and res[0] == "ok":
                 res[1].close()

@@ -185,7 +185,18 @@ Si alguien huye (`3` / `q`) o se cae la conexión, el otro lo ve y gana. Es para
 cada uno, así que nada impide hacer trampa a propósito.
 
 Si es la primera vez, el firewall de Windows va a preguntar si dejás a Python usar la red: aceptá en **redes privadas**.
-La sala usa el puerto TCP 5757 y los avisos van por UDP 5758.
+La sala usa el puerto TCP 5757 (o el 35757 / 45757 si ese no se puede) y los avisos van por UDP 5758 (o 35758 / 45758).
+
+**Si no conecta en la misma red** («no contesta» o «no hay ninguna sala abierta ahí»): Windows (Hyper-V, WSL, Docker)
+reserva rangos de puertos que **cambian al reiniciar**, y a veces el 5757 cae en uno. Entonces la sala abre sola en
+otro puerto y lo muestra en la pantalla de quien la creó como **`IP:puerto`** (ej. `192.168.0.38:35757`, con el motivo
+entre paréntesis). El amigo la encuentra igual con «Buscar salas»; si no, aprieta **`i`** y escribe exactamente esa
+`IP:puerto` (si escribe solo la IP, pokewalk prueba los tres puertos de sala). Para ver qué puertos tiene reservados
+Windows: `netsh int ipv4 show excludedportrange protocol=tcp`.
+
+> Avanzado (opcional, como administrador): para que el 5757 quede siempre libre se lo puede reservar para uso propio
+> antes de que lo tome Windows: `net stop winnat`, `netsh int ipv4 add excludedportrange protocol=tcp startport=5757 numberofports=1`
+> y `net start winnat`. No hace falta: pokewalk ya se arregla con los otros puertos.
 
 ### Torneo en la misma red (`v` → 1 → 2)
 
