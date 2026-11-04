@@ -64,23 +64,30 @@ def pretty(name):
 
 # Los textos de un turno se escriben una sola vez, pero en una batalla en red cada jugador los lee desde su
 # lado ("¡Ganó tu equipo!" para uno es "¡Ganó el equipo rival!" para el otro). Lo que depende de la
-# perspectiva se marca con side_text() y se resuelve al mostrarlo, con resolve_text().
-_SIDE_RE = re.compile("\x02(\\d)\x1f(.*?)\x1f(.*?)\x03", re.S)
+# perspectiva se marca con side_text() y se resuelve al mostrarlo, con resolve_text(). Quien solo mira (un
+# espectador del torneo) lee una tercera versión, `watch`, donde WHO se cambia por el nombre del jugador de ese lado.
+_SIDE_RE = re.compile("\x02(\\d)\x1f([^\x1f\x03]*)\x1f([^\x1f\x03]*)(?:\x1f([^\x1f\x03]*))?\x03")
+WHO = "\x0e"
 
 
-def side_text(s, mine, theirs):
-    """`mine` lo lee quien juega el lado `s`; el otro lee `theirs`."""
-    return f"\x02{s}\x1f{mine}\x1f{theirs}\x03"
+def side_text(s, mine, theirs, watch=None):
+    """`mine` lo lee quien juega el lado `s`; el otro lee `theirs`; un espectador, `watch` (con WHO = ese jugador)."""
+    return f"\x02{s}\x1f{mine}\x1f{theirs}" + ("" if watch is None else f"\x1f{watch}") + "\x03"
 
 
-def resolve_text(text, me=0):
-    """Texto final para quien juega el lado `me`."""
-    return _SIDE_RE.sub(lambda m: m.group(2) if int(m.group(1)) == me else m.group(3), text)
+def resolve_text(text, me=0, names=None):
+    """Texto final para quien juega el lado `me`; con `me` None, para un espectador (`names` = jugador de cada lado)."""
+    def pick(m):
+        s = int(m.group(1))
+        if me is None:
+            return m.group(4).replace(WHO, names[s]) if (m.group(4) is not None and names) else m.group(3)
+        return m.group(2) if s == me else m.group(3)
+    return _SIDE_RE.sub(pick, text)
 
 
 def flip_text(text):
     """El mismo texto, visto desde el otro lado."""
-    return _SIDE_RE.sub(lambda m: side_text(1 - int(m.group(1)), m.group(2), m.group(3)), text)
+    return _SIDE_RE.sub(lambda m: "\x02" + str(1 - int(m.group(1))) + m.group(0)[2:], text)
 
 
 def get_json(fetch, url, cache_name):
@@ -340,7 +347,7 @@ class Battle:
 
     def lab(self, s):
         f = self.fighter(s)
-        return side_text(s, f.name, f"{f.name} rival")
+        return side_text(s, f.name, f"{f.name} rival", f"{f.name} de {WHO}")
 
     def snap(self):
         """(índice activo, estado, confuso, HP de todo el equipo) por lado."""
@@ -415,12 +422,14 @@ class Battle:
 
     # --- turnos
     def turn(self, action, foe_action=None):
-        """Resuelve un turno completo ("move", i) / ("switch", i) y devuelve los pasos para animarlo.
-        El rival juega `foe_action` (otra persona, en red) o, si no hay, lo que decida `ai_action`."""
+        """Resuelve un turno completo ("move", i) / ("switch", i) / ("pass", 0) y devuelve los pasos para animarlo.
+        El rival juega `foe_action` (otra persona, en red) o, si no hay, lo que decida `ai_action`. "pass" = ese lado
+        perdió el turno (en el torneo, se le acabó el tiempo): su Pokémon no hace nada y el otro juega igual."""
         acts = [action, foe_action if foe_action is not None else self.ai_action(1)]
         for s in (0, 1):
             self.fighter(s).flinch = False
-        steps = []
+        steps = [self.step(f"¡{self.lab(s)} no hizo nada! (se le acabó el tiempo)", dur=1.2)
+                 for s in (0, 1) if acts[s][0] == "pass"]
         for s in sorted((s for s in (0, 1) if acts[s][0] == "switch"), key=lambda s: -self.speed(self.fighter(s))):
             steps += self._switch(s, acts[s][1])
         movers = [s for s in (0, 1) if acts[s][0] == "move"]
@@ -457,12 +466,14 @@ class Battle:
     def _switch(self, s, idx, forced=False):
         old, steps = self.fighter(s), []
         if not forced and old.hp > 0:
-            steps.append(self.step(side_text(s, f"¡Vuelve {old.name}!", f"¡El rival retira a {old.name}!"), dur=1.0))
+            steps.append(self.step(side_text(s, f"¡Vuelve {old.name}!", f"¡El rival retira a {old.name}!",
+                                             f"¡{WHO} retira a {old.name}!"), dur=1.0))
         old.stages = {k: 0 for k in STAT_ES}
         old.confused, old.flinch = 0, False
         self.active[s] = idx
         new = self.fighter(s)
-        steps.append(self.step(side_text(s, f"¡Adelante, {new.name}!", f"¡El rival envía a {new.name}!"), dur=1.3))
+        steps.append(self.step(side_text(s, f"¡Adelante, {new.name}!", f"¡El rival envía a {new.name}!",
+                                         f"¡{WHO} envía a {new.name}!"), dur=1.3))
         return steps
 
     def _check_faints(self, att_side=None):
@@ -478,7 +489,8 @@ class Battle:
                 self.over = True
                 self.winner = 1 - wiped[0] if len(wiped) == 1 else (None if att_side is None else 1 - att_side)
                 steps.append(self.step("¡Empate!" if self.winner is None else
-                                       side_text(self.winner, "¡Ganó tu equipo!", "¡Ganó el equipo rival!"), dur=1.8))
+                                       side_text(self.winner, "¡Ganó tu equipo!", "¡Ganó el equipo rival!",
+                                                 f"¡Ganó {WHO}!"), dur=1.8))
         return steps
 
     def _can_move(self, s, steps):

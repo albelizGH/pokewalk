@@ -150,8 +150,8 @@ La sala usa el puerto TCP 5757 y los avisos van por UDP 5758.
 
 ### Torneo en la misma red (`v` → 4)
 
-Para jugar entre 3 y 8 en la misma red. Por ahora está **la sala del torneo**: el cuadro y las peleas llegan en la
-próxima versión.
+Para jugar entre 3 y 8 en la misma red. Por ahora están **la sala del torneo** y **peleas de prueba** que todos miran
+en vivo; el cuadro (eliminación directa) y los relojes llegan en la próxima versión.
 
 1. El organizador aprieta **`v`**, elige **4 Crear torneo** y fija las reglas como en una sala de versus (de cuántos
    Pokémon son los equipos, el nivel y si entran legendarios / míticos).
@@ -162,6 +162,13 @@ próxima versión.
    Esc sale del torneo (si es el organizador, lo cierra para todos).
 4. Con 3 o más, el organizador aprieta **Enter** para empezar: la sala se cierra (ya no entra nadie más) y todos
    reciben la lista final de jugadores.
+5. Pelea de prueba: el organizador aprieta **Enter** (el 1º contra el 2º de la lista, o sea él contra el primero que
+   entró) o **2** (el 2º contra el 3º: pelean dos invitados y él mira). A los dos que pelean les aparece el prompt del
+   equipo de siempre (con las reglas de la sala) y después los ataques; Esc ahí, o huir en la batalla, es abandonar la
+   pelea (gana el otro). Si a alguien se le corta la conexión, pierde.
+6. Todos los demás **miran la pelea en vivo**: la misma pantalla de batalla, sin menús, con `Mirando: Ana vs Beto` y
+   lo último que pasó. El organizador arbitra todas las peleas en su compu (las juegue o no): cada uno manda solo su
+   jugada y él resuelve el turno y se lo manda a todos.
 
 Todos se conectan solo a la compu del organizador, así que tiene que poder recibir conexiones (el mismo permiso de
 Windows que para crear una sala de versus). Hace falta la misma versión de pokewalk en todas las compus.

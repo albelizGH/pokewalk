@@ -12,7 +12,8 @@ Cómo funciona:
     que manda el árbitro al final de cada turno.
 
   * Torneo: el organizador abre una sala de torneo (la misma sala, con más lugares) y entran hasta 7 amigos;
-    cada uno tiene una sola conexión, con la compu del organizador (estrella). Ver `Tournament`.
+    cada uno tiene una sola conexión, con la compu del organizador (estrella). Ver `Tournament`. El organizador
+    arbitra todas las peleas (`MatchReferee`), las juegue o no, y todos los que no pelean las miran en vivo.
 
 Protocolo: una línea de JSON por mensaje, sobre TCP. Nada de esto es seguro contra un rival tramposo
 (los equipos los arma cada uno): está pensado para jugar con amigos.
@@ -1004,6 +1005,10 @@ class _TourLobby:
     `view()` en cuadrícula, `text()` en una línea). Etapas: connecting -> hello -> lobby -> started."""
     stage = "lobby"
     max = MAX_PLAYERS
+    note = ""               # novedad de las peleas (la pone pokewalk.py): se ve como título de la sala ya empezada
+
+    def player(self, pid):
+        return next((p for p in self.players if p["id"] == pid), None)
 
     def _label(self, p):
         tags = (["organiza"] if p["id"] == 0 else []) + (["vos"] if p["id"] == self.me else [])
@@ -1012,13 +1017,16 @@ class _TourLobby:
     def _foot(self):
         return "Esc  salir del torneo"
 
+    def _foot_started(self):
+        return "Esc  salir del torneo"
+
     def view(self):
         if self.stage not in ("lobby", "started"):
             return None
         n = len(self.players)
         if self.stage == "started":
-            title = f"Torneo listo: {n} jugadores (el cuadro llega en la próxima versión)"
-            foot = "Esc  salir del torneo"
+            title = self.note or f"Torneo listo: {n} jugadores (el cuadro llega en la próxima versión)"
+            foot = self._foot_started()
         else:
             title = f"Torneo de {self.org} · {rules_text(self.rules)} · {n}/{self.max} jugadores"
             foot = self._foot()
@@ -1071,8 +1079,20 @@ class Tournament(_TourLobby):
         return (f"Faltan {MIN_PLAYERS - n} para empezar · entran con «Buscar salas» o por IP a {ips}"
                 "      Esc  cancela el torneo")
 
+    def _foot_started(self):
+        # pelea de prueba (T2): T3 la cambia por el cuadro
+        two = "   2  pelea de prueba entre el 2º y el 3º (vos mirás)" if len(self.players) >= 3 else ""
+        return f"Enter  pelea de prueba entre el 1º y el 2º{two}      Esc  cancela el torneo"
+
     def key(self, ch):
-        if ch in ("\r", "\n"):
+        """Además de Esc: Enter empieza; ya empezado, Enter / 2 piden una pelea de prueba ("match" con los ids)."""
+        if self.stage == "started":
+            ids = [p["id"] for p in self.players if p["id"] not in self.gone]
+            if ch in ("\r", "\n") and len(ids) >= 2:
+                return ("match", ids[0], ids[1])
+            if ch == "2" and len(ids) >= 3:
+                return ("match", ids[1], ids[2])
+        elif ch in ("\r", "\n"):
             self.start()
             return None
         return super().key(ch)
@@ -1295,6 +1315,7 @@ class Session:
 
     role = None                 # "host" | "guest"
     rules = None                # reglas de la sala (las pone pokewalk.py), para la revancha
+    rematchable = True          # en el torneo no hay revancha
 
     def __init__(self, battle, link, peer):
         self.b, self.link, self.peer = battle, link, peer
@@ -1312,6 +1333,14 @@ class Session:
             return
         self.out.append(("end", f"¡{self.peer} huyó del combate!  ¡Ganaste!" if kind == "bye"
                          else f"Se cortó la conexión con {self.peer}."))
+
+    def _turn(self, m):
+        """Un turno que mandó el árbitro (copia espejo): pasos para animar y el estado en que queda."""
+        sizes = [len(x) for x in self.b.teams]
+        steps = [step_from_wire(x, sizes) for x in m["steps"]]
+        load_state(self.b, m["state"])
+        self.done = self.b.over
+        self.out.append(("steps", steps))
 
     # --- revancha: cuando los dos la piden se vuelve a la sala (misma conexión, sin IPs ni búsqueda)
     def rematch(self):
@@ -1343,21 +1372,19 @@ class Session:
         self.link.close(None if self.done else "flee")
 
 
-class HostSession(Session):
-    """El árbitro: tiene la batalla de verdad (lado 0 = yo, lado 1 = el invitado)."""
-    role = "host"
+PASS = ("pass", 0)             # jugada que pone el árbitro cuando a alguien se le acaba el tiempo (nunca llega por red)
 
-    def __init__(self, battle, link, peer):
-        super().__init__(battle, link, peer)
+
+class Referee:
+    """El que resuelve los turnos, sin red: tiene la batalla de verdad, junta lo que elige cada lado y, cuando
+    están los dos, resuelve. Lo usan el versus (`HostSession`) y el torneo (`MatchReferee`)."""
+
+    def __init__(self, battle):
+        self.b = battle
         self.choice = [None, None]
 
-    def act(self, action):
-        self._choose(0, "act", action)
-
-    def send(self, idx):
-        self._choose(0, "send", idx)
-
-    def _expected(self, s):
+    def expected(self, s):
+        """Qué tiene que mandar el lado `s`: "act" (su jugada), "send" (reemplazo) o None (nada)."""
         b = self.b
         if b.over:
             return None
@@ -1365,15 +1392,31 @@ class HostSession(Session):
             return "send"
         return None if any(b.pending) else "act"
 
-    def _choose(self, s, kind, val):
-        if kind != self._expected(s) or self.choice[s] is not None:
-            return
+    def waiting(self):
+        """Lados que todavía no eligieron lo que les toca (para el reloj del torneo)."""
+        return [s for s in (0, 1) if self.expected(s) and self.choice[s] is None]
+
+    def choose(self, s, kind, val):
+        """Lo que eligió el lado `s`. Devuelve los pasos del turno si con esto se pudo resolver, si no None."""
+        if kind != self.expected(s) or self.choice[s] is not None:
+            return None
         # una jugada ilegible vale igual (queda []), y `_clean` la cambia por una válida: así nadie se cuelga
         self.choice[s] = val if kind == "send" else (list(val) if isinstance(val, (list, tuple)) else [])
-        self._resolve()
+        return self._resolve()
+
+    def pass_turn(self, s):
+        """Se le acabó el tiempo al lado `s`: pierde el turno (su Pokémon no hace nada; el otro juega igual). Si le
+        tocaba elegir reemplazo, entra el primero que puede pelear. Devuelve los pasos (o None, como `choose`)."""
+        kind = self.expected(s)
+        if not kind or self.choice[s] is not None:
+            return None
+        self.choice[s] = PASS if kind == "act" else self.b.alive(s)[0]
+        return self._resolve()
 
     def _clean(self, s, a):
-        """La jugada del invitado, validada: una inválida se cambia por un ataque que se pueda usar."""
+        """La jugada de un lado, validada: una inválida se cambia por un ataque que se pueda usar."""
+        if a is PASS:
+            return PASS
         b, f = self.b, self.b.fighter(s)
         try:
             kind, i = a
@@ -1391,7 +1434,7 @@ class HostSession(Session):
         need = [s for s in (0, 1) if b.pending[s]]
         if need:
             if any(self.choice[s] is None for s in need):
-                return
+                return None
             steps = []
             for s in need:
                 idx = self.choice[s]
@@ -1400,12 +1443,37 @@ class HostSession(Session):
                 steps += b.send(idx, s)
         else:
             if None in self.choice:
-                return
+                return None
             steps = b.turn(self._clean(0, self.choice[0]), self._clean(1, self.choice[1]))
         self.choice = [None, None]
-        self.done = b.over
-        self.link.send({"t": "turn", "steps": [step_to_wire(x, flip=True) for x in steps],
-                        "state": dump_state(b, flip=True)})
+        return steps
+
+
+def turn_msg(b, steps, flip=False, **extra):
+    """{"t": "turn", "steps", "state"}: un turno resuelto, para quien juega el lado 1 si `flip`."""
+    return {"t": "turn", "steps": [step_to_wire(x, flip) for x in steps], "state": dump_state(b, flip), **extra}
+
+
+class HostSession(Session):
+    """El árbitro del versus: tiene la batalla de verdad (lado 0 = yo, lado 1 = el invitado)."""
+    role = "host"
+
+    def __init__(self, battle, link, peer):
+        super().__init__(battle, link, peer)
+        self.ref = Referee(battle)
+
+    def act(self, action):
+        self._choose(0, "act", action)
+
+    def send(self, idx):
+        self._choose(0, "send", idx)
+
+    def _choose(self, s, kind, val):
+        steps = self.ref.choose(s, kind, val)
+        if steps is None:
+            return
+        self.done = self.b.over
+        self.link.send(turn_msg(self.b, steps, flip=True))
         self.out.append(("steps", steps))
 
     def poll(self):
@@ -1441,11 +1509,7 @@ class GuestSession(Session):
             try:
                 t = m.get("t")
                 if t == "turn":
-                    sizes = [len(x) for x in self.b.teams]
-                    steps = [step_from_wire(x, sizes) for x in m["steps"]]
-                    load_state(self.b, m["state"])
-                    self.done = self.b.over
-                    self.out.append(("steps", steps))
+                    self._turn(m)
                 elif t == "rematch":
                     self._on_rematch()
                 elif t in ("bye", "_closed"):
@@ -1454,3 +1518,310 @@ class GuestSession(Session):
                 self._bad()
         out, self.out = self.out, []
         return out
+
+
+# --------------------------------------------------------------------------- torneo: las peleas
+# El organizador arbitra TODAS las peleas (también las que no juega) con un `MatchReferee`; los dos que pelean le
+# mandan su equipo y sus jugadas, y él les manda a ellos y a todos los demás (que miran) cada turno resuelto. Del
+# lado de cada participante (invitados, y el organizador en su propia compu, sin socket) lo atiende un `MatchClient`.
+# Toda pelea lleva "m": su número; lo de otra pelea se ignora. Jugador = {"id", "name"}; `a` es el lado 0 del árbitro.
+#   org -> todos       {"t": "m_prep", "m", "a", "b", "rules"}       se arma la pelea: a y b, armen su equipo
+#   peleador -> org    {"t": "m_team", "m", "fighters": [luchador...]}   su equipo (validado con `team_problem`)
+#   org -> todos       {"t": "m_start", "m", "a", "b", "rules", "teams": [[luchador...] de a, [...] de b]}
+#   peleador -> org    {"t": "act", "m", "a": [tipo, i]} / {"t": "send", "m", "i": índice}   como en el versus
+#   org -> todos       {"t": "turn", "m", "steps", "state"}           a `b` dado vuelta (flip); al resto, desde `a`
+#   peleador -> org    {"t": "m_quit", "m"}                           abandonó (pierde la pelea)
+#   org -> todos       {"t": "m_over", "m", "winner": id | None, "why": texto}   terminó (None: empate o se cayó todo)
+class MatchSession(Session):
+    """Una pelea del torneo vista desde un participante: una copia espejo de la batalla (lado 0 = yo; si solo miro,
+    el jugador `a`) que se actualiza con los turnos del árbitro. No lee el Link: los mensajes se los pasa
+    `MatchClient` (`feed`) y lo que elige sale por `send_fn`. `side` = mi lado (0 / 1 del árbitro) o None si miro;
+    `names` = (jugador de la izquierda, de la derecha) como se ven en mi pantalla."""
+    role = "guest"
+    rematchable = False
+
+    def __init__(self, battle, mid, side, names, send_fn, rules=None, me=None):
+        super().__init__(battle, None, names[1] if side is not None else f"{names[0]} vs {names[1]}")
+        self.mid, self.side, self.names, self.send_fn, self.rules, self.me = mid, side, names, send_fn, rules, me
+
+    def act(self, action):
+        self.send_fn({"t": "act", "m": self.mid, "a": list(action)})
+
+    def send(self, idx):
+        self.send_fn({"t": "send", "m": self.mid, "i": idx})
+
+    def feed(self, m):
+        try:
+            if m.get("t") == "turn":
+                self._turn(m)
+            elif m.get("t") == "m_over":
+                why = _text(m.get("why"), 120) or "Terminó la pelea."
+                if self.side is not None and m.get("winner") is not None:
+                    why += "  ¡Ganaste!" if m.get("winner") == self.me else "  Perdiste."
+                self.abort(why)
+        except Exception:                               # algo raro del árbitro: no tumbar la pantalla
+            self.abort("El organizador mandó algo que no entiendo. Se corta la pelea.")
+
+    def abort(self, text):
+        """Se terminó por algo que no fue la batalla (abandono, desconexión, se cerró el torneo)."""
+        if not self.done and not self.left:
+            self.left = True
+            self.out.append(("end", text))
+
+    def poll(self):
+        out, self.out = self.out, []
+        return out
+
+    def close(self):
+        if self.side is not None and not self.done and not self.left:
+            self.send_fn({"t": "m_quit", "m": self.mid})        # salir a mitad de la pelea = perderla
+        self.left = True
+
+
+class MatchTeam:
+    """Tu equipo para una pelea del torneo. Se hace pasar por la sala de versus (`Versus`) para que pokewalk.py
+    use el mismo camino de siempre: el prompt del equipo, los ataques y `set_team`."""
+    tour_match = True
+    role = "guest"
+    prev_team = prev_sprites = None
+
+    def __init__(self, name, mid, foe, rules, send_fn):
+        self.name, self.mid, self.peer, self.rules, self.send_fn = name, mid, foe, room_rules(rules), send_fn
+        self.stage = "team"
+        self.my = self.my_sprites = self.foe = None
+        self.sent = False
+
+    def set_team(self, fighters, sprites):
+        self.my, self.my_sprites, self.stage, self.sent = fighters, sprites, "waiting", True
+        self.send_fn({"t": "m_team", "m": self.mid, "fighters": [fighter_to_wire(f) for f in fighters]})
+
+    def update(self):
+        return None
+
+    def key(self, ch):
+        return "cancel" if ch == "\x1b" else None
+
+    def view(self):
+        return None
+
+    def text(self):
+        if self.stage == "waiting":
+            return f"Tu equipo está listo. Esperando a que {self.peer} arme el suyo..."
+        return f"Torneo · tu pelea contra {self.peer} · armá tu equipo..."
+
+    def close(self):
+        if not self.sent:                               # salir sin mandar equipo = perder la pelea
+            self.send_fn({"t": "m_quit", "m": self.mid})
+            self.sent = True
+
+
+class MatchClient:
+    """Las peleas del torneo desde un participante (un invitado, o el organizador en su compu). `handle(msg)` toma
+    un mensaje de pelea y devuelve eventos para pokewalk.py:
+        ("team", MatchTeam)       te toca pelear: armá tu equipo (MatchTeam hace de sala de versus)
+        ("start", MatchSession)   arrancó la pelea (la jugás o la mirás): armar la escena
+        ("note", texto)           novedad para mostrar en la sala del torneo
+        ("over", ganador, texto)  terminó (la escena se entera por su sesión)
+    `send_fn(msg)` le hace llegar algo al árbitro; `make_chart()` da la tabla de tipos para la copia espejo."""
+
+    def __init__(self, me, name, send_fn, make_chart):
+        self.me, self.name, self.send_fn, self.make_chart = me, name, send_fn, make_chart
+        self.session = None
+        self.mid = None
+
+    def handle(self, m):
+        t = m.get("t")
+        try:
+            if t == "m_prep":
+                return self._prep(m)
+            if t == "m_start":
+                return self._start(m)
+            if t in ("turn", "m_over") and m.get("m") == self.mid:
+                if self.session:
+                    self.session.feed(m)
+                if t == "m_over":
+                    win = m.get("winner")
+                    return [("over", win if isinstance(win, int) else None, _text(m.get("why"), 120))]
+        except (KeyError, TypeError, ValueError, AttributeError, IndexError):
+            return [("note", "El organizador mandó una pelea que no entiendo.")]
+        return []
+
+    def _prep(self, m):
+        a, b = players_from_wire([m["a"], m["b"]])
+        self.mid, self.session = m["m"], None
+        if self.me in (a["id"], b["id"]):
+            foe = b if self.me == a["id"] else a
+            return [("team", MatchTeam(self.name, self.mid, foe["name"], m.get("rules"), self.send_fn)),
+                    ("note", f"¡Te toca! Tu pelea: contra {foe['name']}. Armá tu equipo.")]
+        return [("note", f"Próxima pelea: {a['name']} vs {b['name']} (están armando sus equipos)")]
+
+    def _start(self, m):
+        a, b = players_from_wire([m["a"], m["b"]])
+        self.mid = m["m"]                               # (también si me perdí el "m_prep")
+        teams =[team_from_wire(x) for x in list(m["teams"])[:2]]
+        rules = room_rules(m.get("rules"))
+        side = 0 if self.me == a["id"] else 1 if self.me == b["id"] else None
+        names = (a["name"], b["name"])
+        if side == 1:                                   # el árbitro me tiene en el lado 1: yo me veo a la izquierda
+            teams.reverse()
+            names = names[::-1]
+        battle = pb.Battle(teams[0], teams[1], self.make_chart())
+        battle.human = [True, True]
+        self.session = MatchSession(battle, self.mid, side, names, self.send_fn, rules, self.me)
+        what = "¡A pelear!" if side is not None else "Mirando:"
+        return [("start", self.session), ("note", f"{what} {a['name']} vs {b['name']}")]
+
+
+class MatchReferee:
+    """El organizador arbitra una pelea del torneo entre los jugadores `a` y `b` (ids; `a` es el lado 0), la juegue
+    él o no. Junta los equipos, arma la batalla (la tabla de tipos `chart` se precarga en un hilo) y resuelve cada
+    turno cuando están las dos jugadas; se lo manda a los dos y a todos los que miran. Lo del organizador (id 0, sin
+    socket) queda en `local` y pokewalk.py lo toma con `take_local()`; lo que él manda entra por `receive(0, msg)`.
+    `update(eventos del torneo)` toma los mensajes de esta pelea y las desconexiones, y devuelve:
+        ("started",)                    los dos equipos están y arrancó la batalla
+        ("turn", pasos)                 se resolvió un turno (el reloj de T3 vuelve a empezar)
+        ("over", ganador_id, texto)     terminó (ganador None: empate o no se pudo armar)
+    Para T3: `waiting_for()` (quiénes deben algo), `pass_turn(id)` (se le acabó el tiempo: pierde el turno),
+    `forfeit(id, texto)` (pierde la pelea: desconexión, 3 turnos perdidos...)."""
+    _seq = 0
+
+    def __init__(self, tour, a, b, chart):
+        MatchReferee._seq += 1
+        self.mid, self.tour, self.ids, self.chart = MatchReferee._seq, tour, [a, b], chart
+        self.players = [tour.player(a) or {"id": a, "name": "?"}, tour.player(b) or {"id": b, "name": "?"}]
+        self.teams = [None, None]
+        self.stage = "teams"            # teams -> loading -> battle -> over
+        self.ref = None
+        self.winner = None
+        self.local, self._out = [], []
+        self._chart_ok = threading.Event()
+        self._chart_err = ""
+        self._all({"t": "m_prep", "m": self.mid, "a": self.players[0], "b": self.players[1], "rules": tour.rules})
+
+    # --- a quién le llega
+    def _to(self, pid, msg):
+        if pid == 0:
+            self.local.append(msg)
+        else:
+            self.tour.send(pid, msg)
+
+    def _all(self, msg):
+        for p in self.tour.players:
+            if p["id"] not in self.tour.gone:
+                self._to(p["id"], msg)
+
+    def take_local(self):
+        """Mensajes para el organizador (su `MatchClient`), en orden."""
+        out, self.local = self.local, []
+        return out
+
+    def _name(self, pid):
+        return self.players[self.ids.index(pid)]["name"]
+
+    # --- lo que llega
+    def update(self, events=()):
+        for ev in events:
+            if ev[0] == "msg":
+                self.receive(ev[1], ev[2])
+            elif ev[0] == "left" and ev[1] in self.ids:
+                self.forfeit(ev[1], f"Se cortó la conexión con {self._name(ev[1])}.")
+        if self.stage == "loading" and self._chart_ok.is_set():
+            if self._chart_err:
+                self._end(None, f"No pude preparar la pelea: {self._chart_err}")
+            else:
+                self._begin()
+        out, self._out = self._out, []
+        return out
+
+    def receive(self, pid, m):
+        """Un mensaje de un jugador (el organizador es el id 0)."""
+        if not isinstance(m, dict) or m.get("m") != self.mid or pid not in self.ids or self.stage == "over":
+            return
+        s, t = self.ids.index(pid), m.get("t")
+        try:
+            if t == "m_team" and self.stage == "teams" and self.teams[s] is None:
+                self._team(s, m)
+            elif t in ("act", "send") and self.stage == "battle":
+                steps = self.ref.choose(s, t, m.get("a") if t == "act" else m.get("i"))
+                if steps is not None:
+                    self._turn(steps)
+            elif t == "m_quit":
+                self.forfeit(pid, f"{self._name(pid)} abandonó la pelea.")
+        except Exception as e:                          # nada de un jugador puede tumbar al organizador
+            self._end(None, f"Se cortó la pelea por un error: {e}")
+
+    def _team(self, s, m):
+        rules = self.tour.rules
+        try:
+            team = team_from_wire(m["fighters"])
+            problem = ("más Pokémon que los de la sala" if len(m["fighters"]) > rules["size"]
+                       else team_problem(team, rules))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            problem = "no se entiende"
+        if problem:                                     # un cliente tocado se salta el chequeo del prompt
+            self.forfeit(self.ids[s], f"{self.players[s]['name']} mandó un equipo inválido ({problem}).")
+            return
+        self.teams[s] = team
+        if all(self.teams):
+            self.stage = "loading"
+            types = {mv.type for t in self.teams for f in t for mv in f.moves}
+            threading.Thread(target=self._preload, args=(types,), daemon=True).start()
+
+    def _preload(self, types):
+        try:
+            self.chart.preload(types)
+        except Exception as e:                          # sin internet la primera vez
+            self._chart_err = str(e) or e.__class__.__name__
+        self._chart_ok.set()
+
+    def _begin(self):
+        battle = pb.Battle(self.teams[0], self.teams[1], self.chart)
+        battle.human = [True, True]
+        self.ref, self.stage = Referee(battle), "battle"
+        self._all({"t": "m_start", "m": self.mid, "a": self.players[0], "b": self.players[1], "rules": self.tour.rules,
+                   "teams": [[fighter_to_wire(f) for f in t] for t in self.teams]})
+        self._out.append(("started",))
+
+    def _turn(self, steps):
+        b = self.ref.b
+        plain, flipped = turn_msg(b, steps, m=self.mid), turn_msg(b, steps, flip=True, m=self.mid)
+        for p in self.tour.players:
+            if p["id"] not in self.tour.gone:
+                self._to(p["id"], flipped if p["id"] == self.ids[1] else plain)
+        self._out.append(("turn", steps))
+        if b.over:
+            win = None if b.winner is None else self.ids[b.winner]
+            self._end(win, "¡Empate!" if win is None else f"¡Ganó {self._name(win)}!")
+
+    def _end(self, winner, why):
+        if self.stage == "over":
+            return
+        self.stage, self.winner = "over", winner
+        self._all({"t": "m_over", "m": self.mid, "winner": winner, "why": why})
+        self._out.append(("over", winner, why))
+
+    # --- para T3 (reloj y desconexiones)
+    def waiting_for(self):
+        """Ids de los que deben algo: su equipo, su jugada o su reemplazo."""
+        if self.stage == "teams":
+            return [pid for pid, t in zip(self.ids, self.teams) if t is None]
+        if self.stage == "battle":
+            return [self.ids[s] for s in self.ref.waiting()]
+        return []
+
+    def pass_turn(self, pid):
+        """Se le acabó el tiempo a `pid` en la batalla: pierde el turno. True si había algo que elegir."""
+        if self.stage != "battle" or pid not in self.ids:
+            return False
+        s = self.ids.index(pid)
+        if s not in self.ref.waiting():
+            return False
+        steps = self.ref.pass_turn(s)
+        if steps is not None:
+            self._turn(steps)
+        return True
+
+    def forfeit(self, pid, why):
+        """`pid` pierde la pelea (abandono, desconexión, equipo inválido)."""
+        if self.stage != "over" and pid in self.ids:
+            self._end(self.ids[1 - self.ids.index(pid)], why)
