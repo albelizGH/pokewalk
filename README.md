@@ -34,7 +34,7 @@ py install.py --keys alt+shift+k   # otro atajo
 
 | Tecla | Qué hace |
 |---|---|
-| `a` | agregar: nombre o número + Enter |
+| `a` | agregar: nombre o número + Enter. `Tab` (o Enter solo) abre una lista por región (Kanto, Johto...): cada uno aparece con su número de Pokédex: tipeá el número (o parte del nombre) y Enter, `←` `→` cambian de página, Backspace vuelve. La lista con `Tab` también anda al cambiar todos (`c`), en batallas (`b`), info (`i`) y al armar el equipo del versus: lo que elegís se escribe en el prompt |
 | `c` | cambiar todos: varios separados por espacio + Enter |
 | `x` | sacar: nombre, número o el principio del nombre (`pika`) + Enter. Enter solo saca el último |
 | `r` | agregar uno al azar |

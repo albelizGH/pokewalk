@@ -700,16 +700,17 @@ def find_pet(pets, term):
 
 
 PROMPTS = {
-    "add": "Agregar (nombre o número, Enter)",
-    "set": "Cambiar todos (separados por espacio, Enter)",
+    "add": "Agregar (nombre o número, Enter;  Tab o Enter solo = lista por región)",
+    "set": "Cambiar todos (separados por espacio, Enter;  Tab = lista por región)",
     "del": "Sacar (nombre, número o principio del nombre; Enter solo = el último)",
-    "battle": "Batalla (pika char = 1 vs 1;  pika char vs mew snor = equipos;  Enter solo = 3 vs 3 al azar)",
+    "battle": "Batalla (pika char = 1 vs 1;  pika char vs mew snor = equipos;  Enter solo = 3 vs 3 al azar;  Tab = lista)",
     "pet": "Mimar a (nombre, número o principio; Enter solo = uno al azar)",
-    "info": "Info de (nombre, número o principio; Enter solo = uno que camina)",
+    "info": "Info de (nombre, número o principio; Enter solo = uno que camina;  Tab = lista por región)",
     "vsip": "IP del amigo (ej. 192.168.1.20; Esc vuelve)",
-    "vsteam": "Conectado con {peer}. Tu equipo (hasta 6; pika:60 = nivel 60; Enter solo = los que caminan)",
-    "vsteam_again": "Revancha con {peer}. Enter solo = el mismo equipo y ataques de recién; o armá otro (pika:60 char)",
+    "vsteam": "Conectado con {peer}. Tu equipo (hasta 6; pika:60 = nivel 60; Enter solo = los que caminan;  Tab = lista)",
+    "vsteam_again": "Revancha con {peer}. Enter solo = el mismo equipo y ataques de recién; o armá otro (pika:60 char;  Tab = lista)",
 }
+DEX_MODES = ("add", "set", "battle", "info", "vsteam")   # prompts donde Tab abre la lista por región
 
 
 def prompt_line(label, buf, cur, cols):
@@ -1028,6 +1029,19 @@ def prepare_versus(vs, loader, jobs):
         jobs.put(("vsbattle", battle, [vs.my_sprites, foe_sprites], intro, session))
     except Exception as e:
         jobs.put(("vsfatal", f"No pude preparar la batalla: {e}", 6))
+
+
+REGIONS = ["Kanto", "Johto", "Hoenn", "Sinnoh", "Teselia", "Kalos", "Alola", "Galar", "Paldea"]   # por generación
+DEX_PAGE = 9    # Pokémon por página en la lista por región
+
+
+def species_by_gen():
+    """Generación (1..9) -> [(número de Pokédex, nombre)] de esa generación en orden (de pokemon_species.csv)."""
+    raw = fetch(SPECIES_URL, "species.csv").decode("utf-8")
+    out = {}
+    for r in sorted(csv.DictReader(io.StringIO(raw)), key=lambda r: int(r["id"])):
+        out.setdefault(int(r["generation_id"]), []).append((int(r["id"]), r["identifier"]))
+    return out
 
 
 def load_gyms():
@@ -1547,6 +1561,8 @@ def main():
     battling = False       # preparando una pelea (buscando datos en internet)
     gyms = load_gyms()     # regiones -> grupos -> entrenadores (gimnasios.json)
     gym = None             # menú de combates (tecla g): {"stage": 0..3, "r": región, "g": grupo, "t": entrenador}
+    dex = None             # elegir por región (a + Enter solo): {"gen": None | 1..9, "q": filtro, "page": n}
+    dex_names = None       # generación -> nombres (se carga la primera vez que se abre)
     vs = None              # sala de versus en red (tecla v): pokenet.Versus
     picker = None          # elegir ataques del equipo de versus: MovePicker
     w = sys.stdout.write
@@ -1656,7 +1672,7 @@ def main():
             return "No encontré gimnasios.json (tiene que estar junto a pokewalk.py).   Esc cierra"
         st = gym["stage"]
         if st == 0:
-            return "Combates:  " + "   ".join(f"{i + 1} {r['nombre']}" for i, r in enumerate(gyms)) + "      Esc cancela"
+            return "Combates:  " + "   ".join(f"{i + 1} {r['nombre']}" for i, r in enumerate(gyms)) + "      Esc vuelve"
         region = gyms[gym["r"]]
         if st == 1:
             return f"{region['nombre']}:  " + "   ".join(
@@ -1729,6 +1745,81 @@ def main():
                 gym = {**gym, "stage": 2, "g": i}
             elif st == 2 and i < len(gym_trainers()):
                 gym = {**gym, "stage": 3, "t": gym_trainers()[i]}
+
+    def open_dex():
+        nonlocal dex, dex_names
+        try:
+            dex_names = dex_names or species_by_gen()
+            dex = {"gen": None}
+        except (OSError, ValueError, KeyError) as e:
+            flash(f"No pude bajar la lista de Pokémon: {e}", 5)
+
+    def dex_found():
+        """Los de la región que coinciden con lo tipeado: dígitos = número de Pokédex que empieza así, letras = nombre."""
+        q = dex["q"]
+        return [(i, n) for i, n in dex_names.get(dex["gen"], [])
+                if (str(i).startswith(q) if q.isdigit() else q in n)]
+
+    def dex_page():
+        """((número, nombre) de la página actual, página, total de páginas, cuántos coinciden con el filtro)."""
+        found = dex_found()
+        pages = max(1, -(-len(found) // DEX_PAGE))
+        page = max(0, min(dex["page"], pages - 1))
+        return found[page * DEX_PAGE:(page + 1) * DEX_PAGE], page, pages, len(found)
+
+    def dex_text():
+        if dex["gen"] is None:
+            return "Elegir de:  " + "   ".join(f"{g} {REGIONS[g - 1]}" for g in sorted(dex_names)) + "      Esc vuelve"
+        shown, page, pages, _ = dex_page()
+        return (f"{REGIONS[dex['gen'] - 1]} {page + 1}/{pages}{' [' + dex['q'] + ']' if dex['q'] else ''}:  "
+                + "   ".join(f"#{i} {n}" for i, n in shown) + "      número o nombre + Enter   ←→ página")
+
+    def dex_block(avail):
+        """Lista por región en cuadrícula (None si no hay filas libres: se usa `dex_text`)."""
+        if dex["gen"] is None:
+            return grid([("Elegir Pokémon · ¿de qué región?", HI)],
+                        [opt(str(g), f"{REGIONS[g - 1]} (gen {g})") for g in sorted(dex_names)],
+                        [("Esc", KEY), (" vuelve", DIM)], cols, avail)
+        shown, page, pages, total = dex_page()
+        title = [(f"{REGIONS[dex['gen'] - 1]} · {total} Pokémon", HI), (f"   página {page + 1}/{pages}", DIM)]
+        if dex["q"]:
+            title += [("   buscando: ", DIM), (dex["q"], WARN)]
+        foot = [("número o nombre", KEY), (" + Enter elige    ", DIM), ("←→", KEY), (" página    ", DIM),
+                ("Backspace", KEY), (" regiones    ", DIM), ("Esc", KEY), (" vuelve", DIM)]
+        items = [opt(f"#{i}", n) for i, n in shown] or [[("(ninguno coincide)", DIM)]]
+        return grid(title, items, foot, cols, avail, 3)
+
+    def dex_key(ch):
+        """Región (1-9) -> lista: dígitos o letras buscan (por número de Pokédex o nombre), Enter elige
+        el número exacto o el primero que coincide, ←→ pasan de página, Backspace con la búsqueda vacía vuelve.
+        Lo elegido se escribe en el prompt que la abrió (Esc vuelve a ese prompt sin elegir)."""
+        nonlocal dex, buf, cur
+        if ch == "\x1b":
+            dex = None
+        elif dex["gen"] is None:
+            if ch == "0" or ch in ("\x08", "\x7f"):
+                dex = None
+            elif ch.isdigit() and int(ch) in dex_names:
+                dex = {"gen": int(ch), "q": "", "page": 0}
+        elif ch in ("\x08", "\x7f"):
+            dex = {**dex, "q": dex["q"][:-1], "page": 0} if dex["q"] else {"gen": None}
+        elif ch in (K_LEFT, K_RIGHT):
+            _, page, pages, _ = dex_page()
+            dex = {**dex, "page": max(0, min(pages - 1, page + (1 if ch == K_RIGHT else -1)))}
+        elif ch in ("\r", "\n"):
+            found = dex_found()
+            exact = [p for p in found if str(p[0]) == dex["q"]]
+            pick = (exact or dex_page()[0] or [None])[0]
+            if pick:
+                dex = None
+                if mode == "info" or not buf.strip():       # info toma uno solo: lo reemplaza
+                    buf = pick[1]
+                else:
+                    buf = buf.rstrip() + " " + pick[1]
+                buf += " " if mode != "info" else ""         # listo para tipear otro (o Tab de nuevo)
+                cur = len(buf)
+        elif ch.isprintable() and ch != " ":
+            dex = {**dex, "q": dex["q"] + ch.lower(), "page": 0}
 
     def start_info(parts):
         term = parts[0] if parts else (random.choice(pets).name if pets else str(random.randint(1, 493)))
@@ -1895,9 +1986,14 @@ def main():
                 if gym:
                     gym_key(ch)
                     continue
+                if dex:
+                    dex_key(ch)
+                    continue
                 if mode:
                     cur = min(cur, len(buf))
-                    if ch in ("\r", "\n"):
+                    if mode in DEX_MODES and (ch == "\t" or (mode == "add" and ch in ("\r", "\n") and not buf.strip())):
+                        open_dex()
+                    elif ch in ("\r", "\n"):
                         parts = buf.split()
                         last_input[mode], prompt_err = buf, ""      # por si falla un nombre: se reabre con esto
                         if mode == "del":
@@ -2017,6 +2113,9 @@ def main():
             if gym:
                 block = gym_block(avail)
                 status = None if block else status_line(gym_text(), cols, True)
+            elif dex:
+                block = dex_block(avail)
+                status = None if block else status_line(dex_text(), cols, True)
             elif mode:
                 label = f"{prompt_err}  →  corregí y Enter (Esc cancela)" if prompt_err else PROMPTS[mode]
                 if mode == "vsteam" and vs and not prompt_err:
