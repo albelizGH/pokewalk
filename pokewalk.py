@@ -700,8 +700,8 @@ def find_pet(pets, term):
 
 
 PROMPTS = {
-    "add": "Agregar (nombre o número, Enter;  Tab o Enter solo = lista por región)",
-    "set": "Cambiar todos (separados por espacio, Enter;  Tab = lista por región)",
+    "add": "Agregar (nombre, número o rango 1-10, Enter;  Tab o Enter solo = lista por región)",
+    "set": "Cambiar todos (separados por espacio, rangos 1-10, Enter;  Tab = lista por región)",
     "del": "Sacar (nombre, número o principio del nombre; Enter solo = el último)",
     "battle": "Batalla (pika char = 1 vs 1;  pika char vs mew snor = equipos;  Enter solo = 3 vs 3 al azar;  Tab = lista)",
     "pet": "Mimar a (nombre, número o principio; Enter solo = uno al azar)",
@@ -814,6 +814,23 @@ def text_rows_free(pets, rows, sixel, reserve=1):
 
 # --------------------------------------------------------------------------- batalla
 PET_LINES = ["<3", "¡Hola!", "¿Jugamos?", "¡Me encanta caminar!", "¡Qué lindo día!", "¿Me das una baya?", "¡Presente!"]
+
+
+MAX_PER_ADD = 10    # Pokémon por vez al agregar/cambiar (así un 1-151 no llena la memoria)
+
+
+def expand_ranges(parts, limit=MAX_PER_ADD):
+    """`1-10 pikachu` -> ['1', ..., '10', 'pikachu'] (números de Pokédex; `ho-oh` sigue siendo un nombre).
+    Devuelve (términos, cuántos se dejaron afuera por pasar `limit`)."""
+    out = []
+    for term in parts:
+        a, sep, b = term.partition("-")
+        if sep and a.isdigit() and b.isdigit():
+            lo, hi = sorted((int(a), int(b)))
+            out += [str(n) for n in range(lo, hi + 1)]
+        else:
+            out.append(term)
+    return out[:limit], max(0, len(out) - limit)
 
 
 def expand_name(term, walking):
@@ -2029,8 +2046,10 @@ def main():
                         elif mode == "vsip":
                             vs_connect(buf)
                         elif parts:
+                            parts, cut = expand_ranges(parts)
                             loader.request(parts, replace=(mode == "set"))
-                            flash("Cargando " + ", ".join(parts) + "...", 30)
+                            note = f"   (máximo {MAX_PER_ADD} por vez: quedaron {cut} afuera)" if cut else ""
+                            flash("Cargando " + ", ".join(parts) + "..." + note, 30)
                         mode, buf = None, ""
                     elif ch == "\x1b":
                         if mode == "vsteam":                      # ya estabas en la sala: Esc = salir de ella
