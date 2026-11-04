@@ -27,8 +27,13 @@ Listo: apretá **`Alt+Shift+P`** en Windows Terminal. Si no aparece, cerrá y ab
 ```powershell
 py install.py --scale 1.5          # tamaño de los Pokémon (default 2; los enteros se ven más nítidos)
 py install.py --size 0.18          # alto del panel (fracción de la ventana, default 0.22)
+py install.py --font-size 10       # tamaño de letra del panel (default: el de tu terminal)
 py install.py --keys alt+shift+k   # otro atajo
 ```
+
+Todo eso (menos el atajo) también se cambia desde el juego con la tecla **`o`** (ver [Configuración](#configuración-o)).
+Lo que pasás a `install.py` queda guardado igual que si lo eligieras con `o`; lo que no pasás se queda como lo
+elegiste ahí.
 
 ## Teclas (con el panel de los Pokémon seleccionado)
 
@@ -39,6 +44,7 @@ py install.py --keys alt+shift+k   # otro atajo
 | `c` | cambiar todos: varios separados por espacio + Enter |
 | `x` | sacar: nombre, número o el principio del nombre (`pika`) + Enter. Enter solo saca el último |
 | `r` | agregar uno al azar |
+| `o` | **opciones**: escala de los Pokémon, tamaño de letra, alto del panel y cuándo se duermen (ver [Configuración](#configuración-o)) |
 | `q` | salir |
 | `Esc` | cancelar lo que estás escribiendo |
 
@@ -54,6 +60,27 @@ en amarillo (en rojo los últimos 5 segundos). Usan los colores de tu tema, así
 nombres de los ataques van del color de su tipo, en tonos medios que se leen en los dos fondos, y el tipo igual va
 escrito al lado (`ele 90`).
 
+## Configuración (`o`)
+
+Con **`o`** se abre la configuración: **`1`-`4`** eligen qué cambiar y **`+`** / **`-`** (o `←` / `→`) cambian el
+valor. Esc (o Enter) vuelve. Abajo dice cuándo se aplica cada cambio.
+
+| | Opción | Valores | Cuándo se aplica |
+|---|---|---|---|
+| `1` | Escala de los Pokémon | 1, 1.5, 2, 2.5, 3, 4 | **ya**: los mismos Pokémon se vuelven a armar al tamaño nuevo (los enteros se ven más nítidos). En batalla, desde la próxima |
+| `2` | Tamaño de letra | 6 a 24 | **ya**: cambia el `font.size` del perfil Pokewalk en el `settings.json` de Windows Terminal, que lo relee solo y se lo aplica al panel abierto. En modo Sixel también agranda o achica a los Pokémon |
+| `3` | Alto del panel | 12% a 50% de la ventana | **la próxima vez que abras el panel** (cambia el `size` del atajo; el panel abierto no se mueve) |
+| `4` | Se duermen después de | nunca, 1 a 60 min | **ya** |
+
+- Se guarda en `%LOCALAPPDATA%\pokewalk\config.json` y **gana sobre** `--scale` y `--sleep-after` de la línea de
+  comandos (los que puso `install.py` en el perfil). `py install.py --scale 1.5` también lo guarda ahí, así que los dos
+  dicen siempre lo mismo. Para volver a lo de la línea de comandos, borrá `config.json`.
+- Antes del primer cambio de letra o de alto en cada sesión se guarda una copia `settings.json.bak-pokewalk-<fecha>`,
+  como hace `install.py`. Se cambia solo esa clave; el resto queda igual (si escribiste comentarios `//` a mano en
+  `settings.json`, se pierden, igual que con `install.py`).
+- Si no encuentra el `settings.json` (otra terminal, o no corriste `install.py`), la letra y el alto muestran `?` y
+  avisa por qué; la escala y el sueño andan igual.
+
 ## Reaccionan a tus comandos (solo PowerShell)
 
 `install.py` agrega una línea al final de tu perfil de PowerShell que carga `pokewalk-hook.ps1`.
@@ -64,7 +91,7 @@ Pokémon reaccionan con un globo de texto, sin IA, con reglas simples:
 - **Tests, `git commit`, `git push`** → comentan; si pasan tests o algo largo (+30 s) termina, festejan.
 - **Después de varios errores, algo anda** → "¡Por fin anduvo!".
 - **`rm`/`del`** → "¡Cuidado!".
-- **Sin actividad** (default 5 min, `--sleep-after MIN`, `0` = nunca) → se duermen (`Zzz...`), pero cada tanto
+- **Sin actividad** (default 5 min, `--sleep-after MIN` o `o` → `4`, `0` = nunca) → se duermen (`Zzz...`), pero cada tanto
   se despiertan a estirarse un rato y vuelven a dormirse. Cualquier comando o tecla los despierta.
 
 El hook envuelve `prompt` sin alterar `$?` ni `$LASTEXITCODE`, así que convive con Oh My Posh / starship
@@ -103,7 +130,7 @@ STAB y efectividad de tipos. Nivel 50; el HP va duplicado para que duren más de
 reemplacen) y `Sleep` mientras está dormido. Los ataques especiales lanzan un proyectil y todos hacen un destello al
 impactar, del color del tipo del ataque (la API no trae imágenes de ataques, esto se dibuja acá). Si un Pokémon no tiene
 alguna animación, se usa una embestida simple. En batalla los sprites son un poco más grandes que caminando: si tu panel
-es bajito, agrandalo con `py install.py --size 0.3`.
+es bajito, agrandalo con `o` → `3` (o `py install.py --size 0.3`).
 
 Los datos se buscan en [PokéAPI](https://pokeapi.co) **en el momento**: stats base, ataques con sus efectos (en español)
 y la tabla de tipos. Hace falta internet la primera vez; después queda en caché (`%LOCALAPPDATA%\pokewalk\api`).
@@ -272,7 +299,7 @@ tmux split-window -v -l 8 'python3 ~/pokewalk/pokewalk.py --sixel'
 
 Borrá el perfil **Pokewalk** desde la configuración de Windows Terminal (y la acción "Pokémon caminando"),
 o restaurá la copia `settings.json.bak-pokewalk-*`. Borrá también la línea `# pokewalk-hook` al final de tu perfil
-de PowerShell (`$PROFILE`). El caché de sprites está en `%LOCALAPPDATA%\pokewalk`.
+de PowerShell (`$PROFILE`). El caché de sprites y la configuración (`config.json`) están en `%LOCALAPPDATA%\pokewalk`.
 
 ## Créditos
 

@@ -13,6 +13,7 @@ Teclas mientras corre:
     x  sacar: escribís nombre, número o el principio del nombre (varios con
        espacio) + Enter. Enter solo saca el último.
     r  agregar uno al azar
+    o  opciones: escala, tamaño de letra, alto del panel, cuándo se duermen
     q  salir   (Esc cancela lo que estés escribiendo)
 
 Requisitos: Python 3.8+ y Pillow  ->  pip install pillow
@@ -45,6 +46,7 @@ except ImportError:
     sys.exit("Falta Pillow:  pip install pillow")
 
 import pokebattle as pb
+import pokeconfig as pc
 import pokenet as pn
 
 SPRITE_URL = "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/sprite/{id:04d}/{file}"
@@ -56,10 +58,8 @@ ALPHA_MIN = 128
 SLEEP_AFTER = 5 * 60            # s sin comandos para que empiecen a dormirse (--sleep-after, en minutos)
 WAKE_LINES = ["*bostezo*", "Mmm... ¿qué hora es?", "*se estira*", "¿Seguís ahí?", "Un ratito más..."]
 
-if os.name == "nt":
-    CACHE = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "pokewalk")
-else:
-    CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "pokewalk")
+CACHE = pc.CACHE                                    # %LOCALAPPDATA%\pokewalk (o ~/.cache/pokewalk)
+CONFIG_FILE = os.path.join(CACHE, "config.json")    # lo que se elige con la tecla o (ver pokeconfig.py)
 STATE_FILE = os.path.join(CACHE, "ultimos.txt")
 EVENTS_FILE = os.path.join(CACHE, "events.jsonl")   # lo escribe pokewalk-hook.ps1
 ALIVE_FILE = os.path.join(CACHE, "alive")           # latido: el hook solo escribe si está fresco
@@ -391,6 +391,10 @@ class Loader:
         self.busy = 0
         self.progress = None    # (cuántos van, total, nombre) de la última carga de varios, para "Cargando 23/151: …"
 
+    def set_scale(self, scale):
+        """Otra escala (tecla o): los sprites, caminando y de batalla, se vuelven a armar cuando se piden."""
+        self.scale, self.cache = scale, {}
+
     def request(self, names, replace):
         self.busy += 1
         self.progress = None
@@ -399,6 +403,7 @@ class Loader:
     def _work(self, names, replace):
         ok, errors = [], []
         many = len(names) > 1
+        scale, cache = self.scale, self.cache       # si cambian la escala a mitad de camino, esta carga no ensucia la nueva
         for i, n in enumerate(names, 1):
             try:
                 if many:
@@ -406,9 +411,9 @@ class Loader:
                 dex, key = resolve(n)
                 if many:
                     self.progress = (i, len(names), key)        # ya con el nombre (si escribió un número)
-                if dex not in self.cache:
-                    self.cache[dex] = Sprite(dex, self.scale)
-                ok.append((key, self.cache[dex]))
+                if dex not in cache:
+                    cache[dex] = Sprite(dex, scale)
+                ok.append((key, cache[dex]))
             except Exception as e:  # red, nombre inválido, sprite faltante...
                 errors.append(f"{n}: {e}")
         if many:
@@ -929,6 +934,116 @@ def text_rows_free(pets, rows, sixel, reserve=1):
     if not pets:
         return max(reserve, rows - 1)
     return max(reserve, top_row_of(pets, rows, sixel, reserve) - 1)
+
+
+# --------------------------------------------------------------------------- configuración (tecla o)
+class SettingsMenu:
+    """Configuración: `1`-`4` eligen la opción y `+` / `-` (o `←` / `→`) cambian su valor, que queda guardado en
+    config.json. La escala y el sueño los aplica el juego al toque (`key` devuelve ("scale", x) / ("sleep_after",
+    minutos)); la letra y el alto del panel se escriben en el settings.json de Windows Terminal."""
+    OPTS = (    # (clave, nombre, nombre corto, cuándo se aplica, valores que ofrece + / -, valor si no se sabe)
+        ("scale", "Escala de los Pokémon", "Escala", "se ve ya (en batalla, desde la próxima)", pc.SCALES, 2.0),
+        ("font_size", "Tamaño de letra", "Letra", "se aplica ya (también agranda o achica a los Pokémon)",
+         pc.FONT_SIZES, pc.FONT_DEFAULT),
+        ("panel", "Alto del panel", "Alto", "se aplica la próxima vez que abras el panel", pc.PANELS, 0.22),
+        ("sleep_after", "Se duermen después de", "Dormir", "se aplica ya", pc.SLEEPS, 5.0),
+    )
+    IN_WT = ("font_size", "panel")         # viven en el settings.json de Windows Terminal
+
+    def __init__(self, values, config_path, settings_path):
+        """`values`: lo que usa el juego ahora (scale, sleep_after en minutos); la letra y el alto se leen del
+        settings.json de Windows Terminal (si no se puede, se avisa y lo demás sigue andando)."""
+        self.config_path, self.settings_path = config_path, settings_path
+        self.vals = {"scale": values.get("scale"), "sleep_after": values.get("sleep_after"),
+                     "font_size": None, "panel": None}
+        self.sel, self.note, self.wt_error = 0, None, None
+        try:
+            self.vals["font_size"], self.vals["panel"] = pc.wt_values(settings_path)
+        except pc.SettingsError as e:
+            self.wt_error = f"{e}: esto no se puede cambiar"
+
+    def value_text(self, k):
+        v = self.vals.get(k)
+        if v is None:
+            return "?"
+        if k == "panel":
+            return f"{round(v * 100)}%"
+        if k == "sleep_after":
+            return "nunca" if v == 0 else f"{pc.fmt_num(v)} min"
+        return pc.fmt_num(v)
+
+    def key(self, ch):
+        """None | "close" | (clave, valor nuevo) cuando el juego tiene que aplicarlo."""
+        if ch in ("\x1b", "\r", "\n", "0", "o", "O"):
+            return "close"
+        if len(ch) == 1 and ch in "1234":
+            self.sel, self.note = int(ch) - 1, None
+            return None
+        delta = 1 if ch in ("+", "=", K_RIGHT) else -1 if ch in ("-", "_", K_LEFT) else 0
+        if not delta:
+            return None
+        k, _, short, when, values, fallback = self.OPTS[self.sel]
+        if k in self.IN_WT and self.wt_error:
+            self.note = (BAD, f"{NO_MARK} {self.wt_error}", f"{NO_MARK} {self.wt_error}")
+            return None
+        cur = self.vals.get(k)
+        new = pc.step(values, fallback if cur is None else cur, delta)
+        if cur is not None and abs(new - cur) < 1e-9:
+            text = f"{short} ya está en el {'máximo' if delta > 0 else 'mínimo'}"
+            self.note = (WARN, text, text)
+            return None
+        try:
+            if k == "font_size":
+                pc.set_font_size(self.settings_path, new)
+            elif k == "panel":
+                pc.set_panel_size(self.settings_path, new)
+        except pc.SettingsError as e:
+            self.note = (BAD, f"{NO_MARK} {e}", f"{NO_MARK} {e}")
+            return None
+        self.vals[k] = new
+        self.note = (GOOD, f"{OK_MARK} {short} {self.value_text(k)}: {when}", f"{OK_MARK} {when}")
+        try:
+            pc.update_config({k: new}, self.config_path)
+        except OSError as e:
+            self.note = (WARN, f"⚠ {short} {self.value_text(k)}: {when}, pero no pude guardarlo para la próxima ({e})",
+                         f"⚠ {when}, pero no pude guardarlo")
+        return (k, new) if k not in self.IN_WT else None
+
+    def _item(self, i, short=False):
+        k, name, sname = self.OPTS[i][:3]
+        on = i == self.sel
+        val = self.value_text(k)
+        return [("▶" if on else " ", WARN), (str(i + 1), KEY), (" " + (sname if short else name), WARN if on else HI),
+                (" " if short else ": ", DIM), (val, DIM if val == "?" else GOOD)]
+
+    def _note(self, full=True):
+        """Lo que pasó con el último cambio o, si no, cuándo se aplica la opción elegida."""
+        if self.note:
+            return [(self.note[1] if full else self.note[2], self.note[0])]
+        k, name, short, when = self.OPTS[self.sel][:4]
+        if k in self.IN_WT and self.wt_error:
+            return [(f"{NO_MARK} {self.wt_error}", BAD)]
+        return [((name if full else short) + ": " + when, DIM)]
+
+    HINTS = [("1", KEY), ("-", DIM), ("4", KEY), (" elegí   ", DIM), ("+", KEY), (" ", ""), ("-", KEY), (" cambian   ", DIM),
+             ("Esc", KEY), (" listo", DIM)]
+
+    def lines(self, cols, avail):
+        """Las filas del menú para `avail` filas libres: título, opciones en 2 columnas y pie si entran; si no, las
+        opciones en una fila; y si hay una sola, una línea con la opción elegida y las teclas."""
+        width = max(10, cols - 1)
+        items = [self._item(i) for i in range(len(self.OPTS))]
+        title = [("Configuración", HI), ("   ", "")] + self.HINTS
+        for out in (grid(title, items, self._note(), cols, 99, 2),
+                    grid(None, items, self.HINTS[4:] + [("   ", "")] + self._note(), cols, 99, 2)):
+            if len(out) <= avail:
+                return out
+        row = flat([self._item(i, True) for i in range(len(self.OPTS))], "  ")
+        if avail >= 2 and plen(row) <= width:          # los números ya se ven arriba: primero + - y Esc, después el aviso
+            return [seg(row, width), seg(self.HINTS[4:] + [("   ", "")] + self._note(False), width)]
+        keys = [("1", KEY), ("-", DIM), ("4", KEY), (" ", ""), ("+", KEY), (" ", ""), ("-", KEY), (" ", ""), ("Esc", KEY)]
+        return [seg([("Config ", HI)] + self._item(self.sel, True) + [("  ", "")] + keys + [("  ", "")]
+                     + self._note(False), width)]
 
 
 # --------------------------------------------------------------------------- batalla
@@ -2189,6 +2304,9 @@ def main():
     ap.add_argument("--sleep-after", type=float, default=SLEEP_AFTER / 60, metavar="MIN",
                     help="minutos sin comandos para que se duerman (default 5, 0 = nunca)")
     args = ap.parse_args()
+    saved = pc.load_config(CONFIG_FILE)     # lo elegido con la tecla o gana sobre --scale / --sleep-after (README)
+    args.scale = saved.get("scale", args.scale)
+    args.sleep_after = saved.get("sleep_after", args.sleep_after)
     sleep_after = max(0.0, args.sleep_after) * 60
     bg = None
     if args.sixel and args.bg.lower() != "none":
@@ -2230,6 +2348,8 @@ def main():
     director = None        # el organizador: el cuadro y las peleas del torneo (pokenet.TourDirector)
     mc = None              # las peleas del torneo desde acá (juego o miro): pokenet.MatchClient
     picker = None         # elegir ataques del equipo de versus: MovePicker
+    setmenu = None         # la configuración (tecla o): SettingsMenu
+    rescale_at = 0.0       # cuándo volver a armar los que caminan con la escala nueva (espera a que dejes de tocar +)
     w = sys.stdout.write
     w("\x1b[?1049h\x1b[?25l\x1b[2J")
 
@@ -2380,11 +2500,14 @@ def main():
         names = ", ".join(p.name for p in pets) or "(vacío)"
         fights = [opt("b", "batalla"), opt("v", "versus"), opt("g", "gimnasios")]
         team = [opt("a", "agregar"), opt("c", "cambiar"), opt("x", "sacar"), opt("r", "azar")]
-        more = [opt("i", "info"), opt("h", "mimar"), opt("q", "salir")]
+        more = [opt("i", "info"), opt("h", "mimar"), opt("o", "opciones"), opt("q", "salir")]
         width = max(10, cols - 1)
-        if avail >= 2 and cols >= 84 and not talking:
+        second = [("Equipo    ", DIM)] + flat(team) + [("      Más: ", DIM)] + flat(more)
+        if plen(second) > width:                         # que no se corte "q salir": más juntos
+            second = [("Equipo    ", DIM)] + flat(team, "  ") + [("   Más: ", DIM)] + flat(more, "  ")
+        if avail >= 2 and plen(second) <= width and not talking:
             return [seg([("Combates  ", DIM)] + flat(fights) + [("      Tus Pokémon: ", DIM), (names, HI)], width),
-                    seg([("Equipo    ", DIM)] + flat(team) + [("      Más: ", DIM)] + flat(more), width)]
+                    seg(second, width)]
         return [seg(flat(fights + team + more, "  ") + [("   ·  ", DIM), (names, DIM)], width)]
 
     def gym_key(ch):
@@ -2625,12 +2748,22 @@ def main():
             prog = loader.progress
             if prog and msg.startswith("Cargando") and time.time() < msg_until:
                 flash("Cargando %d/%d: %s..." % prog, 30)
+            if rescale_at and time.time() >= rescale_at:    # cambió la escala (tecla o): los mismos, a la nueva
+                rescale_at = 0.0
+                if pets:
+                    loader.request([p.name for p in pets], replace=True)
             while not loader.done.empty():
                 replace, ok, errors = loader.done.get()
                 loader.busy -= 1
+                ok = [(n, s) for n, s in ok if getattr(s, "scale", loader.scale) == loader.scale]   # de otra escala: no
+                old = pets
                 if replace and ok:
                     pets = []
                 pets += [Pet(n, s, cols * px_per_col, speed_mult) for n, s in ok]
+                if replace and ok:                          # los mismos de antes siguen donde estaban
+                    for p, was in zip(pets, old):
+                        if p.name == was.name:
+                            p.x, p.dir = was.x, was.dir
                 save([p.name for p in pets])
                 redraw = True
                 if errors:
@@ -2728,6 +2861,16 @@ def main():
                         mode, buf, cur, prompt_err = "vscode", "", 0, ""
                     elif act == "level":
                         mode, buf, cur, prompt_err = "vslevel", "", 0, ""
+                    continue
+                if setmenu:
+                    act = setmenu.key(ch)
+                    if act == "close":
+                        setmenu = None
+                    elif act and act[0] == "scale":
+                        loader.set_scale(act[1])
+                        rescale_at = time.time() + 0.6      # si sigue apretando + no rearmar en cada paso
+                    elif act and act[0] == "sleep_after":
+                        sleep_after = act[1] * 60
                     continue
                 if gym:
                     gym_key(ch)
@@ -2848,6 +2991,9 @@ def main():
                             vs = pn.Versus(pn.player_name())
                     elif c == "h" and pets:
                         mode, buf = "pet", ""
+                    elif c == "o":
+                        setmenu = SettingsMenu({"scale": loader.scale, "sleep_after": sleep_after / 60},
+                                               CONFIG_FILE, pc.find_settings())
 
             # --- tamaño
             size = shutil.get_terminal_size()
@@ -2879,7 +3025,9 @@ def main():
             avail = text_rows_free(pets, rows, args.sixel)
             talking = any(p.say_until > time.time() for p in pets)
             block = None
-            if gym:
+            if setmenu:
+                block = setmenu.lines(cols, avail)
+            elif gym:
                 block = gym_block(avail)
                 status = None if block else status_line(gym_text(), cols, True)
             elif dex:

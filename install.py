@@ -6,22 +6,25 @@ Instala pokewalk en Windows Terminal:
   - agrega el atajo Alt+Shift+P que abre el panel abajo y te devuelve el foco arriba
 
 Uso:   py install.py                 (se puede volver a correr para actualizar)
-       py install.py --scale 1.5 --size 0.2 --keys alt+shift+k
+       py install.py --scale 1.5 --size 0.2 --font-size 10 --keys alt+shift+k
 Antes de tocar nada guarda una copia: settings.json.bak-pokewalk-<fecha>
+Las opciones que pasás se guardan también en la configuración del juego (tecla o); las que no pasás
+quedan como las elegiste ahí.
 """
 import argparse
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
 import time
 
+from pokeconfig import ACTION_ID, CONFIG_FILE, GUID, fmt_num, load_config, parse_settings, settings_candidates, \
+    update_config
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "pokewalk.py")
-GUID = "{3f6b2c1e-8a4d-4e5f-9b7c-25a0c0ffee25}"
-ACTION_ID = "User.Pokewalk"
+DEFAULTS = {"scale": 2.0, "panel": 0.22, "sleep_after": 5.0}
 
 # Fondos de los esquemas que vienen con Windows Terminal (no aparecen en settings.json)
 BUILTIN_BG = {
@@ -30,66 +33,6 @@ BUILTIN_BG = {
     "solarized light": "FDF6E3", "tango dark": "000000", "tango light": "FFFFFF",
     "dark+": "1E1E1E", "cga": "000000", "ibm 5153": "000000",
 }
-
-
-def settings_candidates():
-    la = os.environ.get("LOCALAPPDATA", "")
-    return [
-        os.path.join(la, "Packages", "Microsoft.WindowsTerminal_8wekyb3d8bbwe", "LocalState", "settings.json"),
-        os.path.join(la, "Packages", "Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe", "LocalState", "settings.json"),
-        os.path.join(la, "Microsoft", "Windows Terminal", "settings.json"),
-    ]
-
-
-def strip_jsonc(text):
-    """Saca comentarios // y /* */ y comas colgantes, respetando strings."""
-    out, i, n, in_str = [], 0, len(text), False
-    while i < n:
-        c = text[i]
-        if in_str:
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(text[i + 1])
-                i += 1
-            elif c == '"':
-                in_str = False
-        elif c == '"':
-            in_str = True
-            out.append(c)
-        elif text.startswith("//", i):
-            while i < n and text[i] not in "\r\n":
-                i += 1
-            continue
-        elif text.startswith("/*", i):
-            end = text.find("*/", i + 2)
-            i = n if end < 0 else end + 2
-            continue
-        else:
-            out.append(c)
-        i += 1
-    s = "".join(out)
-    # comas colgantes (fuera de strings)
-    out, in_str, i = [], False, 0
-    while i < len(s):
-        c = s[i]
-        if in_str:
-            out.append(c)
-            if c == "\\" and i + 1 < len(s):
-                out.append(s[i + 1])
-                i += 1
-            elif c == '"':
-                in_str = False
-        elif c == '"':
-            in_str = True
-            out.append(c)
-        elif c == ",":
-            m = re.match(r",\s*([}\]])", s[i:])
-            if not m:
-                out.append(c)
-        else:
-            out.append(c)
-        i += 1
-    return "".join(out)
 
 
 def scheme_background(s):
@@ -155,15 +98,22 @@ def install_hook():
 
 def main():
     ap = argparse.ArgumentParser(description="Instala pokewalk en Windows Terminal")
-    ap.add_argument("--scale", default="2", help="tamaño de los Pokémon (default 2)")
-    ap.add_argument("--size", type=float, default=0.22, help="alto del panel, fracción de la ventana (default 0.22)")
+    # Sin --scale / --size / --sleep-after se usa lo que elegiste en el juego (tecla o, config.json) o el default;
+    # lo que pasás acá también se guarda en config.json, así el juego y la instalación dicen lo mismo.
+    ap.add_argument("--scale", type=float, help="tamaño de los Pokémon (default 2)")
+    ap.add_argument("--size", type=float, help="alto del panel, fracción de la ventana (default 0.22)")
+    ap.add_argument("--font-size", type=int, help="tamaño de letra del panel (default: el de tu terminal)")
     ap.add_argument("--keys", default="alt+shift+p", help="atajo de teclado (default alt+shift+p)")
     ap.add_argument("--settings", help="ruta a settings.json si no lo encuentra solo")
+    ap.add_argument("--config", default=CONFIG_FILE, help=argparse.SUPPRESS)     # para probar con una copia
     ap.add_argument("--no-pip", action="store_true", help="no instalar Pillow")
     ap.add_argument("--no-hook", action="store_true",
                     help="no tocar el perfil de PowerShell (los Pokémon no reaccionan a tus comandos)")
-    ap.add_argument("--sleep-after", default="5", help="minutos sin comandos para que se duerman (default 5, 0 = nunca)")
+    ap.add_argument("--sleep-after", type=float, help="minutos sin comandos para que se duerman (default 5, 0 = nunca)")
     args = ap.parse_args()
+    chosen = {k: v for k, v in (("scale", args.scale), ("panel", args.size), ("sleep_after", args.sleep_after),
+                                ("font_size", args.font_size)) if v is not None}
+    opts = {**DEFAULTS, **load_config(args.config), **chosen}
 
     if not args.no_pip:
         print("Instalando Pillow...")
@@ -175,23 +125,23 @@ def main():
     print("Configuración:", path)
 
     raw = open(path, encoding="utf-8-sig").read()
-    try:
-        s = json.loads(raw)
-    except json.JSONDecodeError:
-        s = json.loads(strip_jsonc(raw))
+    s = parse_settings(raw)
 
     backup = f"{path}.bak-pokewalk-{time.strftime('%Y%m%d-%H%M%S')}"
     shutil.copy2(path, backup)
     print("Copia de seguridad:", backup)
 
     bg, scheme = scheme_background(s)
-    cmd = f'"{sys.executable}" "{SCRIPT}" --sixel --bg {bg} --scale {args.scale} --sleep-after {args.sleep_after}'
+    cmd = (f'"{sys.executable}" "{SCRIPT}" --sixel --bg {bg} --scale {fmt_num(opts["scale"])}'
+           f' --sleep-after {fmt_num(opts["sleep_after"])}')
 
     profiles = s.setdefault("profiles", {})
     if isinstance(profiles, list):                    # formato viejo
         profiles = s["profiles"] = {"list": profiles}
     plist = profiles.setdefault("list", [])
-    plist[:] = [p for p in plist if p.get("guid") != GUID and p.get("name") != "Pokewalk"]
+    old = [p for p in plist if p.get("guid") == GUID or p.get("name") == "Pokewalk"]
+    font = next((p["font"] for p in old if isinstance(p.get("font"), dict)), None)   # la letra que elegiste (tecla o)
+    plist[:] = [p for p in plist if p not in old]
     prof = {
         "guid": GUID,
         "name": "Pokewalk",
@@ -208,6 +158,10 @@ def main():
     }
     if scheme and isinstance(scheme, str):
         prof["colorScheme"] = scheme
+    if "font_size" in opts:
+        font = {**(font or {}), "size": opts["font_size"]}
+    if font:
+        prof["font"] = font
     plist.append(prof)
 
     actions = s.setdefault("actions", [])
@@ -216,7 +170,7 @@ def main():
         "id": ACTION_ID,
         "name": "Pokémon caminando (panel abajo)",
         "command": {"action": "multipleActions", "actions": [
-            {"action": "splitPane", "split": "down", "size": args.size, "profile": "Pokewalk"},
+            {"action": "splitPane", "split": "down", "size": opts["panel"], "profile": "Pokewalk"},
             {"action": "moveFocus", "direction": "up"}]},
     }
     keys = args.keys.lower()
@@ -235,6 +189,11 @@ def main():
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump(s, f, indent=2, ensure_ascii=False)
+    if chosen:
+        try:
+            update_config(chosen, args.config)
+        except OSError as e:
+            print("Ojo: no pude guardar las opciones en", args.config, f"({e})")
 
     if not args.no_hook:
         install_hook()
