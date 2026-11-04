@@ -732,8 +732,8 @@ def find_pet(pets, term):
 
 
 PROMPTS = {
-    "add": "Agregar (nombre, número o rango 1-10, Enter;  Tab o Enter solo = lista por región)",
-    "set": "Cambiar todos (separados por espacio, rangos 1-10, Enter;  Tab = lista por región)",
+    "add": "Agregar (nombre, número o rango como 152-160, Enter;  Tab o Enter solo = lista por región)",
+    "set": "Cambiar todos (separados por espacio o un rango como 1-6, Enter;  Tab = lista por región)",
     "del": "Sacar (nombre, número o principio del nombre; Enter solo = el último)",
     "battle": "Batalla (pika char = 1 vs 1;  pika char vs mew snor = equipos;  Enter solo = 3 vs 3 al azar;  Tab = lista, y en ella Tab = el rival)",
     "pet": "Mimar a (nombre, número o principio; Enter solo = uno al azar)",
@@ -748,9 +748,27 @@ PROMPTS = {
 DEX_MODES = ("add", "set", "battle", "info", "vsteam")   # prompts donde Tab abre la lista por región
 
 
-def prompt_line(label, buf, cur, cols):
+# --------------------------------------------------------------------------- colores de la interfaz
+# Los 8 colores ANSI de siempre (cada tema de la terminal los ajusta a su fondo, claro u oscuro) y nada de blanco
+# brillante ni de colores "brillantes", que en un tema claro casi no se ven. El color nunca es lo único que dice algo:
+# siempre va con un símbolo o una palabra (✓ elegido, ✗ no se puede, ⚠ aviso, ▶ lo actual).
+KEY = "\x1b[36m"        # teclas que se pueden apretar (cian)
+HI = "\x1b[1m"          # texto principal: negrita con el color de letra del tema
+DIM = "\x1b[90m"        # ayuda y datos secundarios (gris)
+GOOD = "\x1b[32m"       # elegido / listo / a favor (verde)
+BAD = "\x1b[31m"        # error / no se puede / último aviso (rojo)
+WARN = "\x1b[33m"       # aviso, lo que estás buscando, relojes, lo que se juega ahora (amarillo)
+OK_MARK, NO_MARK = "✓", "✗"
+
+
+def clock_style(secs):
+    """Color de un reloj: amarillo y, en los últimos 5 segundos, rojo."""
+    return BAD if secs is not None and secs <= 5 else WARN
+
+
+def prompt_line(label, buf, cur, cols, style=HI):
     """Línea de entrada con cursor (video inverso). Lo escrito siempre se ve: si no entra, primero se
-    acorta la etiqueta y, si hace falta, se desplaza una ventana sobre el texto."""
+    acorta la etiqueta y, si hace falta, se desplaza una ventana sobre el texto. `style` = color de la etiqueta."""
     width = max(8, cols - 1)
     room = max(10, width - len(label) - 2)
     if len(buf) + 1 > room:
@@ -761,19 +779,17 @@ def prompt_line(label, buf, cur, cols):
     seen = buf[start:start + room]
     k = cur - start
     view = seen[:k] + "\x1b[7m" + (seen[k:k + 1] or " ") + "\x1b[27m" + seen[k + 1:]
-    return f"\x1b[1;1H\x1b[2K\x1b[97m{label}: {view}\x1b[0m"
+    return f"\x1b[1;1H\x1b[2K{style}{label}:\x1b[0m {view}\x1b[0m"
 
 
 def status_line(text, cols, bright=False):
     text = text[:max(0, cols - 1)]
-    color = "\x1b[97m" if bright else "\x1b[90m"
-    return f"\x1b[1;1H\x1b[2K{color}{text}\x1b[0m"
+    return f"\x1b[1;1H\x1b[2K{HI if bright else DIM}{text}\x1b[0m"
 
 
 # --------------------------------------------------------------------------- menús de varias líneas
 # Con espacio arriba de los Pokémon los menús se dibujan en cuadrícula y con colores, como en los juegos;
 # si el panel es bajito (no hay filas libres) cada menú cae a su línea compacta de siempre.
-KEY, DIM, HI, GOOD, BAD, WARN = "\x1b[1;36m", "\x1b[90m", "\x1b[97m", "\x1b[32m", "\x1b[31m", "\x1b[33m"
 
 
 def rgb(c):
@@ -788,12 +804,27 @@ def seg(parts, width):
     """Segmentos [(texto, estilo ANSI)] -> texto con colores, cortado y rellenado a `width` columnas."""
     out, used = [], 0
     for text, style in parts:
-        text = text[:max(0, width - used)]
-        if not text:
+        if used >= width:
             break
+        text = text[:width - used]
+        if not text:                    # un segmento vacío (una marca que no va) no corta lo que sigue
+            continue
         out.append(f"{style}{text}\x1b[0m" if style else text)
         used += len(text)
     return "".join(out) + " " * max(0, width - used)
+
+
+HINT_KEY = re.compile(r"(?<!\S)(Esc|Enter|[0-9]|i)(?=  \S)")
+
+
+def hint_parts(text, style=DIM):
+    """Un pie de menú escrito como texto (`0  volver      Esc  cancela`: la tecla y dos espacios) -> segmentos
+    con las teclas resaltadas, como en los demás menús."""
+    out, at = [], 0
+    for m in HINT_KEY.finditer(text):
+        out += [(text[at:m.start()], style), (m.group(1), KEY)]
+        at = m.end()
+    return out + [(text[at:], style)]
 
 
 def opt(key, label, extra=()):
@@ -851,12 +882,9 @@ def text_rows_free(pets, rows, sixel, reserve=1):
 PET_LINES = ["<3", "¡Hola!", "¿Jugamos?", "¡Me encanta caminar!", "¡Qué lindo día!", "¿Me das una baya?", "¡Presente!"]
 
 
-MAX_PER_ADD = 10    # Pokémon por vez al agregar/cambiar (así un 1-151 no llena la memoria)
-
-
-def expand_ranges(parts, limit=MAX_PER_ADD):
-    """`1-10 pikachu` -> ['1', ..., '10', 'pikachu'] (números de Pokédex; `ho-oh` sigue siendo un nombre).
-    Devuelve (términos, cuántos se dejaron afuera por pasar `limit`)."""
+def expand_ranges(parts):
+    """`1-10 pikachu` -> ['1', ..., '10', 'pikachu'] (números de Pokédex; `ho-oh` sigue siendo un nombre y `10-1`
+    vale como `1-10`). Sin tope: cada Pokémon que camina ocupa unos pocos MB (ver el README)."""
     out = []
     for term in parts:
         a, sep, b = term.partition("-")
@@ -865,7 +893,7 @@ def expand_ranges(parts, limit=MAX_PER_ADD):
             out += [str(n) for n in range(lo, hi + 1)]
         else:
             out.append(term)
-    return out[:limit], max(0, len(out) - limit)
+    return out
 
 
 def expand_name(term, walking):
@@ -1170,7 +1198,8 @@ def prepare_match(sess, loader, jobs):
 
 
 REGIONS = ["Kanto", "Johto", "Hoenn", "Sinnoh", "Teselia", "Kalos", "Alola", "Galar", "Paldea"]   # por generación
-DEX_PAGE = 9    # Pokémon por página en la lista por región
+DEX_PAGE = 9    # Pokémon por página en la lista por región hasta que se dibuja (después, los que entren)
+TEAM_MAX = 6    # Pokémon por lado en la batalla (`b`)
 
 
 def species_by_gen():
@@ -1183,12 +1212,22 @@ def species_by_gen():
 
 
 # --------------------------------------------------------------------------- lista por región: lógica pura
+def range_pending(q):
+    """¿Un rango con el final a medio escribir? `162-`, `162-1` y `162-17` sí (el final es más corto y menor que el
+    principio: lo estás tipeando); `162-178` y `260-257` no."""
+    a, sep, b = q.partition("-")
+    return bool(sep and a.isdigit() and (not b or (b.isdigit() and len(b) < len(a) and int(b) < int(a))))
+
+
 def dex_range(q):
-    """`257-260` -> (257, 260); `257-` (a medio tipear) -> (257, 257); otra cosa -> None."""
+    """`257-260` -> (257, 260); con el final a medio tipear (`257-`, `162-1`) -> solo el principio, (257, 257): así
+    la lista no salta a 1-162 mientras escribís 162-178; otra cosa -> None."""
     a, sep, b = q.partition("-")
     if not (sep and a.isdigit() and (b.isdigit() or not b)):
         return None
-    return tuple(sorted((int(a), int(b or a))))
+    if range_pending(q):
+        return int(a), int(a)
+    return tuple(sorted((int(a), int(b))))
 
 
 def range_entries(q, species):
@@ -1218,23 +1257,25 @@ def add_vs(buf):
     return buf.rstrip() + " vs ", None
 
 
-def picked_header(buf, battle=False):
-    """Lo elegido hasta ahora (sale de lo escrito en el prompt): `Elegidos: a, b` o, en la batalla con vs,
-    `Tu equipo: a, b vs Rival: c`. "" si no hay nada."""
-    toks = buf.split()
-    if battle and "vs" in toks:
-        k = toks.index("vs")
-        return f"Tu equipo: {', '.join(toks[:k]) or '—'} vs Rival: {', '.join(toks[k + 1:]) or '—'}"
-    return "Elegidos: " + ", ".join(toks) if toks else ""
+def fit_names(names, width, sep=", "):
+    """`a, b, c` en `width` columnas; si no entran todos, los primeros, `…` y el último (`furret, hoothoot … xatu`)."""
+    text = sep.join(names)
+    if len(text) <= width or len(names) < 2:
+        return text[:max(0, width)]
+    for k in range(len(names) - 2, 0, -1):
+        text = sep.join(names[:k]) + " … " + names[-1]
+        if len(text) <= width:
+            return text
+    return (names[0] + " … " + names[-1])[:max(0, width)]
 
 
 def preview_terms(buf, species=None):
-    """Lo que agregaría Enter en add/set, sin red: ([(número | None, nombre | término tal cual)], cuántos quedan
-    afuera por el tope). Usa la lista de especies ya bajada ({nombre: número}); None si todavía no está."""
+    """Lo que agregaría Enter en add/set, sin red: [(número | None, nombre | término tal cual)]. Usa la lista de
+    especies ya bajada ({nombre: número}); None si todavía no está."""
     species = _species if species is None else species
     if not species:
         return None
-    terms, cut = expand_ranges(buf.split())
+    terms = expand_ranges(buf.split())
     back = {v: k for k, v in species.items()}
     out = []
     for t in terms:
@@ -1244,17 +1285,312 @@ def preview_terms(buf, species=None):
         else:
             key = t.replace(".", "").replace("'", "")
             out.append((species[key], key) if key in species else (None, t))
-    return out, cut
-
-
-def preview_parts(entries, cut, label="Enter agrega: "):
-    """Fila de la vista previa: `#25 pikachu · ¿pikahcu?` (lo desconocido en rojo) y cuántos quedan afuera."""
-    out = [(label, DIM)]
-    for k, (d, n) in enumerate(entries):
-        out += ([(" · ", DIM)] if k else []) + ([(f"#{d} {n}", HI)] if d else [(f"¿{n}?", BAD)])
-    if cut:
-        out.append((f"   (máximo {MAX_PER_ADD} por vez: quedan {cut} afuera)", WARN))
     return out
+
+
+def preview_parts(entries, verb="agrega", width=200):
+    """Fila de la vista previa: `✗ no conozco: ¿pikahcu?   Enter agrega 17: #162 furret · #163 hoothoot … #178 xatu`.
+    Lo que no conozco va primero y en rojo (no se agrega); si no entran todos, los primeros, `…` y el último."""
+    known = [f"#{d} {n}" for d, n in entries if d]
+    unknown = [f"¿{n}?" for d, n in entries if not d]
+    out = [(f"{NO_MARK} no conozco: ", BAD), ("  ".join(unknown), BAD), ("   ", "")] if unknown else []
+    if not known:
+        return out + [("Enter", KEY), (" no agrega nada", DIM)]
+    out += [("Enter", KEY), (f" {verb} {len(known)}", HI), (": ", DIM)]
+    return out + [(fit_names(known, max(10, width - plen(out)), " · "), "")]
+
+
+def special_mark(dex):
+    """" ★" legendario, " ✦" mítico, "" el resto."""
+    return {"legend": " ★", "myth": " ✦"}.get(pn.special_kind(dex), "")
+
+
+DONE_VERB = {"add": "agregarlos", "set": "cambiar todos por estos", "battle": "¡a pelear!", "vsteam": "mandar el equipo",
+             "info": "ver la info"}
+PICKED_LABEL = {"add": "Para agregar", "set": "Cambiar todos por"}
+
+
+class DexList:
+    """La lista por región (Tab en los prompts de DEX_MODES). Lo que elegís se escribe en el prompt que la abrió
+    (`buf`, que es de main) y la lista sigue abierta para elegir más (info toma uno y vuelve al prompt).
+
+    Teclas: 1-9 región; dígitos o letras buscan (número de Pokédex que empieza así o parte del nombre; si en la
+    región no hay ninguno, en todas); `N-M` = esos números de cualquier región; Enter elige (el número exacto, el
+    primero que coincide o el rango entero); Enter solo = listo (lo del prompt: agregar, cambiar, pelear, mandar el
+    equipo); ←→ página; Backspace borra la búsqueda y después vuelve a las regiones; Esc vuelve al prompt; en la
+    batalla Tab escribe ` vs ` (lo que sigue es el rival). Lo último elegido queda a la vista, con ✓, hasta que
+    escribís otra cosa: así se ve qué se eligió."""
+
+    def __init__(self, gens, mode, rules=None):
+        self.gens, self.mode, self.rules = gens, mode, rules
+        self.all = {i: n for g in gens.values() for i, n in g}
+        self.single = mode == "info"                 # info toma uno solo
+        self.gen, self.q, self.page, self.per = None, "", 0, DEX_PAGE
+        self.note = []                               # [(texto, estilo)]: qué pasó con el último Enter / Tab
+        self.last = None                             # lo último elegido [(número, nombre)], a la vista con ✓
+
+    # --- qué hay
+    def found(self):
+        """([(número, nombre)] que coinciden con la búsqueda, ¿de todas las regiones?)."""
+        q = self.q
+        rng = range_entries(q, self.all)
+        if rng is not None:
+            return rng, True
+        hit = (lambda i, n: str(i).startswith(q)) if q.isdigit() else (lambda i, n: q in n)
+        own = [(i, n) for i, n in self.gens.get(self.gen, []) if hit(i, n)]
+        if own or not q:
+            return own, False
+        return [(i, n) for i, n in sorted(self.all.items()) if hit(i, n)], True
+
+    def target(self, found):
+        """Lo que elegiría Enter con esta búsqueda: el rango entero, o el número exacto o el primero que coincide."""
+        if dex_range(self.q) is not None:
+            return found
+        return ([p for p in found if str(p[0]) == self.q] or found)[:1]
+
+    def pages(self):
+        return max(1, -(-len(self.found()[0]) // max(1, self.per)))
+
+    def blocked(self, i, n):
+        """Por qué la sala del versus no lo deja (texto) o None."""
+        return pn.rule_problem(i, pb.pretty(n), self.rules) if self.rules else None
+
+    def sides(self, buf):
+        """(tu lado, el rival o None): lo escrito en el prompt; hay rival solo en la batalla con `vs`."""
+        toks = buf.split()
+        if self.mode == "battle" and "vs" in toks:
+            k = toks.index("vs")
+            return toks[:k], toks[k + 1:]
+        return toks, None
+
+    def limit(self):
+        """(cuántos por lado según el juego, cómo decirlo) o None: el tamaño de la sala del versus o 6 en la batalla.
+        Agregar y cambiar no tienen tope."""
+        if self.mode == "vsteam" and self.rules:
+            size = pn.room_rules(self.rules)["size"]
+            return size, f"la sala es de {size}"
+        if self.mode == "battle":
+            return TEAM_MAX, f"hasta {TEAM_MAX} por equipo"
+        return None
+
+    def room(self, buf):
+        """Cuántos más entran en el lado que se está eligiendo, o None si no hay tope."""
+        lim = self.limit()
+        if lim is None:
+            return None
+        mine, rival = self.sides(buf)
+        return max(0, lim[0] - len(mine if rival is None else rival))
+
+    # --- teclas
+    def key(self, ch, buf):
+        """Una tecla -> (nuevo buf, None | "close" (vuelve al prompt) | "submit" (listo: lo que hace Enter ahí))."""
+        self.note = []
+        if ch == "\x1b":
+            return buf, "close"
+        if ch in ("\r", "\n"):
+            return self._enter(buf)
+        if ch == "\t" and self.mode == "battle":
+            buf, note = add_vs(buf)
+            self.note = [(f"⚠ {note}", WARN) if note else ("▶ Ahora elegís al rival", GOOD)]
+            return buf, None
+        if self.gen is None:
+            if ch == "0" or ch in ("\x08", "\x7f"):
+                return buf, "close"
+            if ch.isdigit() and int(ch) in self.gens:
+                self.gen, self.q, self.page, self.last = int(ch), "", 0, None
+            return buf, None
+        if ch in ("\x08", "\x7f"):
+            if self.last is not None:                   # la búsqueda ya usada se borra entera
+                self.q, self.last = "", None
+            elif self.q:
+                self.q = self.q[:-1]
+            else:
+                self.gen = None
+            self.page = 0
+        elif ch in (K_LEFT, K_RIGHT):
+            self.page = max(0, min(self.pages() - 1, self.page + (1 if ch == K_RIGHT else -1)))
+        elif ch.isprintable() and ch != " ":
+            if self.last is not None:                   # después de elegir, lo que tipeás es otra búsqueda
+                self.q, self.last = "", None
+            self.q, self.page = self.q + ch.lower(), 0
+        return buf, None
+
+    def _enter(self, buf):
+        verb = DONE_VERB[self.mode]
+        if not self.q or self.last is not None or self.gen is None:     # Enter solo: listo
+            if not buf.strip() or buf.split() == ["vs"]:
+                self.note = [("⚠ Primero elegí alguno: número, nombre o rango (ej. 162-178) y Enter", WARN)]
+                return buf, None
+            if self.mode == "battle" and "vs" not in buf.split():
+                buf = buf.rstrip() + " vs "                              # el rival, al azar (como muestra la lista)
+            return buf, "submit"
+        if range_pending(self.q):
+            a = self.q.partition("-")[0]
+            self.note = [(f"⚠ Falta el final del rango: {a}-…  (por ejemplo {a}-{int(a) + 9})", WARN)]
+            return buf, None
+        picks = self.target(self.found()[0])
+        if not picks:
+            self.note = [(f"{NO_MARK} Nada coincide con «{self.q}»", BAD)]
+            return buf, None
+        if self.single:
+            return dex_pick_buf(buf, [picks[0][1]], single=True), "close"
+        why = [self.blocked(i, n) for i, n in picks]
+        ok = [p for p, w in zip(picks, why) if not w]
+        notes = []
+        if len(ok) < len(picks):
+            notes.append(why[0] if len(picks) == 1 else
+                         f"{len(picks) - len(ok)} no entran en la sala: "
+                         + ", ".join(pb.pretty(n) for (_, n), w in zip(picks, why) if w))
+        room, lim = self.room(buf), self.limit()
+        if room == 0 and ok:
+            self.note = [(f"⚠ Ya está completo ({lim[1]}). ", WARN), ("Enter", KEY), (f" solo = {verb}", HI)]
+            return buf, None
+        if room is not None and len(ok) > room:
+            notes.append(f"sobraron {len(ok) - room} ({lim[1]})")
+            ok = ok[:room]
+        if not ok:
+            self.note = [(f"{NO_MARK} " + " · ".join(notes), BAD)]
+            return buf, None
+        buf = dex_pick_buf(buf, [n for _, n in ok])
+        self.last = ok
+        what = f"los {len(ok)}: del #{ok[0][0]} al #{ok[-1][0]}" if len(ok) > 1 else f"#{ok[0][0]} {ok[0][1]}"
+        self.note = [(f"{OK_MARK} Elegiste {what}", GOOD)] + ([(f"   ⚠ {' · '.join(notes)}", WARN)] if notes else [])
+        return buf, None
+
+    # --- dibujo
+    def picked_parts(self, buf, width):
+        """La fila de lo elegido hasta ahora (lo que ya está escrito en el prompt), o [] si no hay nada o es info."""
+        mine, rival = self.sides(buf)
+        if self.single or (not mine and rival is None):
+            return []
+        if self.mode == "battle":
+            half = max(8, width // 2 - 16)
+            return [("▶ " if rival is None else "  ", WARN), (f"Tu equipo ({len(mine)}): ", DIM),
+                    (fit_names(mine, half) or "—", GOOD), ("   vs   ", DIM), ("▶ " if rival is not None else "", WARN),
+                    ("Rival: ", DIM), (fit_names(rival, half), GOOD) if rival else ("al azar", DIM)]
+        lim = self.limit()
+        label = (f"Tu equipo ({len(mine)}/{lim[0]})" if lim else f"{PICKED_LABEL.get(self.mode, 'Elegidos')} ({len(mine)})")
+        return [(label + ": ", DIM), (fit_names(mine, width - len(label) - 2), GOOD)]
+
+    def title_parts(self, found, wide, pages, buf=""):
+        """Qué se está viendo y qué hace Enter (o, recién elegido, qué se eligió y cuál es el paso siguiente)."""
+        page = [(f"   pág. {self.page + 1}/{pages} ←→", DIM)] if pages > 1 else []
+        if self.last is not None:                       # qué se eligió, el paso siguiente y después los avisos
+            return self.note[:1] + [("   Enter", KEY), (f": {DONE_VERB[self.mode]}", HI)] + self.note[1:] + page + \
+                [("   o escribí otro (número, nombre o rango)   ", DIM), ("Esc", KEY), (" vuelve al prompt", DIM)]
+        note = self.note + [("   ", "")] if self.note else []
+        if self.gen is None:
+            return note + [("Elegir Pokémon · ¿de qué región?", HI)]
+        q, rng = self.q, dex_range(self.q)
+        if range_pending(q):
+            return note + [("Rango ", HI), (q + "…", WARN), ("   seguí escribiendo el final", DIM)]
+        if rng:
+            out = [(f"#{rng[0]}-{rng[1]}", HI), (f" · {len(found)}", DIM)]
+        elif q:
+            out = [("Todas las regiones" if wide else REGIONS[self.gen - 1], HI), (" · buscando ", DIM), (q, WARN),
+                   (f" · {len(found)}", DIM)]
+        else:
+            hint = [("   escribí un número, un nombre o un rango (162-178)", DIM)]
+            return note + [(REGIONS[self.gen - 1], HI), (f" · {len(found)} Pokémon", DIM)] + page + hint
+        picks = self.target(found) if q else []
+        if picks and (self.single or len(picks) == 1):
+            out += [("   Enter", KEY), (f" elige #{picks[0][0]} {picks[0][1]}", HI)]
+        elif picks:
+            ok = [p for p in picks if not self.blocked(*p)]
+            room, lim = self.room(buf), self.limit()
+            take = len(ok) if room is None else min(room, len(ok))
+            out += [("   Enter", KEY), (f" elige los {take}", HI)] if take else [("   ⚠ ya está completo", WARN)]
+            if len(ok) < len(picks):
+                out += [(f"   {NO_MARK} {len(picks) - len(ok)} no entran en la sala", WARN)]
+            if 0 < take < len(ok):
+                out += [(f"   ⚠ {lim[1]}: van los primeros {take}", WARN)]
+        return note + out + page
+
+    def foot_parts(self):
+        out = [("1-9", KEY), (" región   ", DIM)] if self.gen is None else [("Enter", KEY), (" elige   ", DIM)]
+        out += [("Enter solo", KEY), (f": {DONE_VERB[self.mode]}   ", DIM)]
+        if self.mode == "battle":
+            out += [("Tab", KEY), (" ahora el rival   ", DIM)]
+        out += [("Esc", KEY), (" vuelve al prompt   ", DIM)]
+        if self.gen is not None:
+            out += [("←→", KEY), (" página   ", DIM), ("Backspace", KEY), (" borra", DIM)]
+        if self.gen is not None:
+            out += [("   ★", WARN), (" legendario ", DIM), ("✦", WARN), (" mítico", DIM)]
+            if self.rules and not all(pn.room_rules(self.rules)[k] for k in ("legend", "myth")):
+                out += [(f"   {NO_MARK}", BAD), (" la sala no lo deja", DIM)]
+        return out
+
+    def cell(self, i, n, picked):
+        """Un Pokémon de la lista: ✓ si ya está elegido, ✗ (y gris) si la sala no lo deja."""
+        if n in picked or str(i) in picked:
+            mark, style = (OK_MARK, GOOD), GOOD
+        elif self.blocked(i, n):
+            mark, style = (NO_MARK, BAD), DIM
+        else:
+            mark, style = (" ", ""), ""
+        return [mark, (f"#{i}", KEY), (" " + n, style), (special_mark(i), WARN)]
+
+    def lines(self, cols, avail, buf):
+        """Las filas de la lista para `avail` filas libres: lo elegido, el título (qué hace Enter), la lista en
+        columnas (todas las que entren) y las teclas. Con una sola fila, la línea compacta."""
+        width = max(10, cols - 1)
+        if avail < 2:
+            return [self.line(width, buf)]
+        picked = self.picked_parts(buf, width)
+        head = 1 if picked and avail >= 3 else 0
+        if self.gen is None:
+            rows = grid(self.title_parts([], False, 1), [opt(str(g), REGIONS[g - 1]) for g in sorted(self.gens)],
+                        self.foot_parts(), cols, avail - head)
+            if rows is None:
+                return [self.line(width, buf)]
+            return ([seg(picked, width)] if head else []) + rows
+        found, wide = self.found()
+        w = max((len(f"{i} {n}") for i, n in found), default=10) + 6        # ✓ # nombre ★ y separación
+        ncols = max(1, min(len(found) or 1, width // w))
+        # el pie (las teclas) va si sobra lugar: recién elegido o buscando, el título ya dice qué hace Enter
+        foot = 1 if avail - 1 - head >= (4 if self.q or self.last is not None else 2) else 0
+        if foot and ncols * (avail - 1 - head - foot) < len(found) <= ncols * (avail - 1 - head):
+            foot = 0                                    # sin el pie entran todos: mejor verlos que paginar
+        body = avail - 1 - head - foot
+        self.per = ncols * body
+        pages = max(1, -(-len(found) // self.per))
+        self.page = min(self.page, pages - 1)
+        shown = found[self.page * self.per:(self.page + 1) * self.per]
+        title = self.title_parts(found, wide, pages, buf)
+        if picked and not head:                                             # sin fila propia: cuántos van
+            mine, rival = self.sides(buf)
+            title = title + [("   elegidos: ", DIM), (str(len(mine) + len(rival or [])), GOOD)]
+        mark = set(buf.lower().split())
+        cells = [self.cell(i, n, mark) for i, n in shown] or [[("(ninguno coincide)", DIM)]]
+        cw = min(width // ncols, w + 2)
+        rows = ["".join(seg(c, cw) for c in cells[r * ncols:(r + 1) * ncols]) for r in range(-(-len(cells) // ncols))]
+        return (([seg(picked, width)] if head else []) + [seg(title, width)] + rows
+                + ([seg(self.foot_parts(), width)] if foot else []))
+
+    def line(self, width, buf):
+        """La lista en una sola fila (panel bajito): lo importante primero (qué hace Enter o qué se eligió)."""
+        mine, rival = self.sides(buf)
+        count = len(mine) + len(rival or [])
+        tail = [("  Esc", KEY), (" vuelve", DIM)]
+        if self.last is not None:
+            return seg(self.note[:1] + [("  Enter", KEY), (f": {DONE_VERB[self.mode]}", HI)] + tail + self.note[1:]
+                       + [("  · o escribí otro", DIM)], width)
+        if self.gen is None:
+            return seg(self.note + [("¿Región? ", HI)] + flat([opt(str(g), REGIONS[g - 1]) for g in sorted(self.gens)], "  ")
+                       + tail, width)
+        found, wide = self.found()
+        title = self.title_parts(found, wide, 1, buf)
+        have = [(f"  ·  {count} elegidos", GOOD)] if count else []
+        room = width - plen(title) - plen(have) - plen(tail) - 10                # 10: la página (`2/3 ←→`)
+        w = max((len(f"{i} {n}") for i, n in found), default=10) + 5
+        self.per = max(1, room // w)
+        pages = max(1, -(-len(found) // self.per))
+        self.page = min(self.page, pages - 1)
+        shown = found[self.page * self.per:(self.page + 1) * self.per]
+        mark = set(buf.lower().split())
+        items = [p for i, n in shown for p in [("  ", "")] + self.cell(i, n, mark)]
+        more = [(f"  {self.page + 1}/{pages}", DIM), (" ←→", KEY)] if pages > 1 else []
+        return seg(title + have + [(" ", "")] + items + more + tail, width)
 
 
 def warm_species():
@@ -1666,7 +2002,7 @@ class BattleScene:
         dots = [h > 0 for h in self.team_hp[s]]
         plain = f"{f.name} Nv{f.level}{tag} [" + "█" * fill + "░" * (bw - fill) + right + \
             (" " + "●" * len(dots) if len(dots) > 1 else "")
-        ansi = (f"\x1b[97m{f.name}\x1b[0m Nv{f.level}\x1b[33m{tag}\x1b[0m [\x1b[{color}m" + "█" * fill
+        ansi = (f"{HI}{f.name}\x1b[0m Nv{f.level}{WARN}{tag}\x1b[0m [\x1b[{color}m" + "█" * fill
                 + "\x1b[90m" + "░" * (bw - fill) + "\x1b[0m" + right)
         if len(dots) > 1:
             ansi += " " + "".join("\x1b[32m●" if d else "\x1b[90m○" for d in dots) + "\x1b[0m"
@@ -1743,6 +2079,8 @@ class BattleScene:
         clock = getattr(self.net, "clock_text", None)
         deciding = self.phase == "wait" if self.watch else self.phase in ("main", "fight", "switch")
         clock = clock() if clock and deciding else None    # torneo: el reloj del árbitro (últimos segundos)
+        until = getattr(self.net, "deadline", None)
+        tick = clock_style(math.ceil(until - time.time()) if until else None)     # rojo en los últimos 5 s
         if self.watch:                                     # mirando: quién pelea y el registro de la pelea
             a, b = self.watch
             now = self.msg if self.phase in ("play", "over") else "eligiendo..." + (f"   ({clock})" if clock else "")
@@ -1761,9 +2099,9 @@ class BattleScene:
         else:
             lines = self._menu_cells(cols, avail) or [seg([(self.menu(), HI)], width)]
             if clock and len(lines) < avail:               # tu reloj, arriba del menú
-                lines = [seg([(clock, WARN)], width)] + lines
+                lines = [seg([(clock, tick)], width)] + lines
             elif clock:
-                lines = [seg([(clock + "   ", WARN), (self.menu(), HI)], width)]
+                lines = [seg([(clock + "   ", tick), (self.menu(), HI)], width)]
         return out + put_rows(lines, 2, 1 + avail)
 
 
@@ -1816,9 +2154,8 @@ def main():
     battling = False       # preparando una pelea (buscando datos en internet)
     gyms = load_gyms()     # regiones -> grupos -> entrenadores (gimnasios.json)
     gym = None             # menú de combates (tecla g): {"stage": 0..3, "r": región, "g": grupo, "t": entrenador}
-    dex = None             # elegir por región (a + Enter solo): {"gen": None | 1..9, "q": filtro, "page": n}
+    dex = None             # la lista por región abierta (Tab en un prompt): un DexList
     dex_names = None       # generación -> nombres (se carga la primera vez que se abre)
-    dex_all = {}           # número -> nombre de todas las regiones (para los rangos `N-M` en la lista)
     pv = {"key": None, "parts": None, "warm": False}   # vista previa de add/set (se calcula al cambiar lo escrito)
     vs = None              # sala de versus en red (tecla v): pokenet.Versus
     tour = None            # torneo (se crea o se entra desde el versus): pokenet.Tournament | TournamentClient
@@ -1853,14 +2190,16 @@ def main():
     mode = None            # None | "add" | "set"
     buf, cur = "", 0       # texto del prompt y posición del cursor
     last_input, prompt_err = {}, ""
-    msg, msg_until = "Cargando...", time.time() + 30
+    msg, msg_until, msg_style = "Cargando...", time.time() + 30, HI
     tick = 1 / max(5, args.fps)
     last = time.perf_counter()
     drawn_rows = 1         # filas de texto que dibujó el cuadro anterior (para borrar lo que sobre)
 
-    def flash(text, secs=4):
-        nonlocal msg, msg_until
-        msg, msg_until = text, time.time() + secs
+    def flash(text, secs=4, style=HI):
+        """Mensaje en la fila de arriba por `secs` s: HI normal, GOOD listo, WARN aviso, BAD error (siempre con
+        palabras que lo dicen: el color solo ayuda)."""
+        nonlocal msg, msg_until, msg_style
+        msg, msg_until, msg_style = text, time.time() + secs, style
 
     def on_command(ev):
         """Un comando terminó en la otra terminal: despierta a todos y uno reacciona."""
@@ -1896,10 +2235,10 @@ def main():
         elif len(parts) <= 2:
             mine, rival = parts[:1], parts[1:]
         else:
-            flash("Para equipos usá vs:  pika char vs mew snor   (hasta 6 por lado)", 6)
+            flash("Para equipos usá vs:  pika char vs mew snor   (hasta 6 por lado)", 6, WARN)
             return
         if max(len(mine), len(rival)) > 6:
-            flash("Hasta 6 Pokémon por equipo", 4)
+            flash("Hasta 6 Pokémon por equipo", 4, WARN)
             return
         walking = [p.name for p in pets]
         mine, rival = ([expand_name(n, walking) for n in team] for team in (mine, rival))
@@ -1975,7 +2314,7 @@ def main():
             return None
         items = [[(it[0], KEY), (" " + it[1], WARN)] if len(it) > 2 and it[2] else opt(it[0], it[1])
                  for it in v["items"]]                     # (tecla, texto[, resaltado]): la pelea en curso del cuadro
-        return grid([(v["title"], WARN if v.get("warn") else HI)], items, [(v["foot"], DIM)], cols, avail, 3)
+        return grid([(v["title"], WARN if v.get("warn") else HI)], items, hint_parts(v["foot"]), cols, avail, 3)
 
     def idle_block(avail, talking):
         """Ayuda de teclas (dos filas agrupadas si hay lugar y ancho; si no, una sola con lo esencial)."""
@@ -2010,155 +2349,26 @@ def main():
                 gym = {**gym, "stage": 3, "t": gym_trainers()[i]}
 
     def open_dex():
-        nonlocal dex, dex_names, dex_all
+        nonlocal dex, dex_names
         try:
             dex_names = dex_names or species_by_gen()
-            dex_all = dex_all or {i: n for g in dex_names.values() for i, n in g}
-            dex = {"gen": None}
+            dex = DexList(dex_names, mode, vs.rules if mode == "vsteam" and vs else None)
         except (OSError, ValueError, KeyError) as e:
-            flash(f"No pude bajar la lista de Pokémon: {e}", 5)
-
-    def dex_found():
-        """Los que coinciden con lo tipeado: `N-M` = esos números de cualquier región; si no, de la región:
-        dígitos = número de Pokédex que empieza así, letras = nombre."""
-        q = dex["q"]
-        rng = range_entries(q, dex_all)
-        if rng is not None:
-            return rng
-        return [(i, n) for i, n in dex_names.get(dex["gen"], [])
-                if (str(i).startswith(q) if q.isdigit() else q in n)]
-
-    def dex_page():
-        """((número, nombre) de la página actual, página, total de páginas, cuántos coinciden con el filtro)."""
-        found = dex_found()
-        pages = max(1, -(-len(found) // DEX_PAGE))
-        page = max(0, min(dex["page"], pages - 1))
-        return found[page * DEX_PAGE:(page + 1) * DEX_PAGE], page, pages, len(found)
-
-    def dex_rules():
-        """Reglas de la sala si la lista se abrió desde el equipo del versus (para atenuar lo que no entra)."""
-        return vs.rules if mode == "vsteam" and vs else None
-
-    def dex_mark(i):
-        """" ★" legendario, " ✦" mítico, "" el resto."""
-        return {"legend": " ★", "myth": " ✦"}.get(pn.special_kind(i), "")
-
-    def dex_head():
-        """Lo elegido hasta ahora y el aviso del último Tab (vacío en info, que toma uno solo)."""
-        head = "" if mode == "info" else picked_header(buf, mode == "battle")
-        note = dex.get("note")
-        return head + (("   " if head else "") + f"({note})" if note else "")
-
-    def dex_text():
-        head = dex_head()
-        head = head + "  ·  " if head else ""
-        if dex["gen"] is None:
-            return (head + "Elegir de:  " + "   ".join(f"{g} {REGIONS[g - 1]}" for g in sorted(dex_names))
-                    + "      Esc vuelve")
-        shown, page, pages, total = dex_page()
-        rng = dex_range(dex["q"]) is not None
-        where = "Rango" if rng else REGIONS[dex["gen"] - 1]
-        cap = f" (solo se agregan {MAX_PER_ADD} por vez)" if rng and total > MAX_PER_ADD and mode != "info" else ""
-        return (head + f"{where} {page + 1}/{pages}{' [' + dex['q'] + ']' if dex['q'] else ''}{cap}:  "
-                + "   ".join(f"#{i} {n}{dex_mark(i)}" for i, n in shown)
-                + ("      Tab = ahora el rival" if mode == "battle" else "")
-                + "      número, nombre o rango + Enter   ←→ página   ★ legendario ✦ mítico")
-
-    def dex_block(avail):
-        """Lista por región en cuadrícula (None si no hay filas libres: se usa `dex_text`). Arriba, si hay
-        lugar, una fila con lo elegido hasta ahora."""
-        head = dex_head()
-        if head and avail >= 2:
-            g = dex_grid(avail - 1)
-            if g:
-                return [seg([(head, GOOD)], max(10, cols - 1))] + g
-        return dex_grid(avail)
-
-    def dex_grid(avail):
-        many = mode != "info"
-        done = (" listo" if many else " vuelve")
-        if dex["gen"] is None:
-            return grid([("Elegir Pokémon · ¿de qué región?", HI)],
-                        [opt(str(g), f"{REGIONS[g - 1]} (gen {g})") for g in sorted(dex_names)],
-                        [("Esc", KEY), (done, DIM)], cols, avail)
-        shown, page, pages, total = dex_page()
-        rng = dex_range(dex["q"]) is not None
-        where = f"Números {dex['q']}" if rng else REGIONS[dex["gen"] - 1]
-        title = [(f"{where} · {total} Pokémon", HI), (f"   página {page + 1}/{pages}", DIM)]
-        if dex["q"] and not rng:
-            title += [("   buscando: ", DIM), (dex["q"], WARN)]
-        if rng and total > MAX_PER_ADD and many:
-            title += [(f"   solo se agregan {MAX_PER_ADD} por vez (Enter escribe los primeros {MAX_PER_ADD})", WARN)]
-        rules = dex_rules()
-        foot = [("número, nombre o rango 1-10", KEY), (" + Enter elige    ", DIM)]
-        if mode == "battle":
-            foot += [("Tab", KEY), (" ahora el rival    ", DIM)]
-        foot += [("←→", KEY), (" página    ", DIM), ("Backspace", KEY), (" regiones    ", DIM),
-                 ("Esc", KEY), (done + "    ", DIM), ("★", WARN), (" legendario  ", DIM), ("✦", WARN), (" mítico", DIM)]
-        if rules and not (rules["legend"] and rules["myth"]):
-            foot += [("   (gris = la sala no lo permite)", DIM)]
-        items = [[(f"#{i}", KEY), (" " + n, DIM if pn.rule_problem(i, n, rules) else HI), (dex_mark(i), WARN)]
-                 for i, n in shown] or [[("(ninguno coincide)", DIM)]]
-        return grid(title, items, foot, cols, avail, 3)
-
-    def dex_key(ch):
-        """Región (1-9) -> lista: dígitos o letras buscan (por número de Pokédex o nombre; `N-M` = esos números
-        de cualquier región), Enter elige el número exacto, el primero que coincide o todo el rango (hasta 10),
-        ←→ pasan de página, Backspace con la búsqueda vacía vuelve a las regiones.
-        Lo elegido se escribe en el prompt que la abrió; en los prompts de varios (todos menos info) la lista
-        sigue abierta para elegir otro, y en la batalla Tab escribe ` vs ` (lo que sigue es el rival).
-        Esc vuelve al prompt con todo lo escrito."""
-        nonlocal dex, buf, cur
-        note = None
-        if ch == "\x1b":
-            dex = None
-            return
-        if ch == "\t" and mode == "battle":
-            buf, note = add_vs(buf)
-            cur = len(buf)
-        elif dex["gen"] is None:
-            if ch == "0" or ch in ("\x08", "\x7f"):
-                dex = None
-                return
-            elif ch.isdigit() and int(ch) in dex_names:
-                dex = {"gen": int(ch), "q": "", "page": 0}
-        elif ch in ("\x08", "\x7f"):
-            dex = {**dex, "q": dex["q"][:-1], "page": 0} if dex["q"] else {"gen": None}
-        elif ch in (K_LEFT, K_RIGHT):
-            _, page, pages, _ = dex_page()
-            dex = {**dex, "page": max(0, min(pages - 1, page + (1 if ch == K_RIGHT else -1)))}
-        elif ch in ("\r", "\n"):
-            found = dex_found()
-            if dex_range(dex["q"]) is not None:
-                picks = found[:MAX_PER_ADD]                   # el rango entero, con el tope de siempre
-            else:
-                exact = [p for p in found if str(p[0]) == dex["q"]]
-                picks = (exact or dex_page()[0])[:1]
-            if picks:
-                buf = dex_pick_buf(buf, [n for _, n in picks], single=(mode == "info"))
-                cur = len(buf)
-                if mode == "info":                            # info toma uno solo: se cierra
-                    dex = None
-                    return
-                dex = {**dex, "q": "", "page": 0}             # sigue abierta en la misma región
-        elif ch.isprintable() and ch != " ":
-            dex = {**dex, "q": dex["q"] + ch.lower(), "page": 0}
-        if dex is not None:
-            dex = {**dex, "note": note}
+            flash(f"No pude bajar la lista de Pokémon: {e}", 5, BAD)
 
     def add_preview():
         """Segmentos de la vista previa de add/set (o None). Se recalcula solo si cambió lo escrito o se terminó
         de bajar la lista de especies; nunca usa la red desde acá (si falta la lista, la baja un hilo aparte)."""
         if not buf.strip():
             return None
-        key = (mode, buf, _species is not None)
+        key = (mode, buf, _species is not None, cols)
         if pv["key"] != key:
             res = preview_terms(buf)
             if res is None and not pv["warm"]:
                 pv["warm"] = True
                 threading.Thread(target=warm_species, daemon=True).start()
             pv["key"] = key
-            pv["parts"] = res and preview_parts(*res, "Enter cambia todos por: " if mode == "set" else "Enter agrega: ")
+            pv["parts"] = res and preview_parts(res, "cambia todos por" if mode == "set" else "agrega", max(10, cols - 1))
         return pv["parts"]
 
     def start_info(parts):
@@ -2182,9 +2392,9 @@ def main():
             p.cheer()
             p.say(f"{pb.pretty(p.name)}: {random.choice(PET_LINES)}", 3)
         if missing:
-            flash("No está: " + ", ".join(missing), 3)
+            flash("No está: " + ", ".join(missing), 3, WARN)
 
-    def close_vs(text="", secs=5):
+    def close_vs(text="", secs=5, style=HI):
         """Sale de la sala de versus (avisa al amigo) y cierra lo que estuviera abierto."""
         nonlocal vs, picker, mode, buf
         if text and getattr(vs, "tour_match", False):     # en el torneo, salir del equipo es abandonar la pelea
@@ -2195,9 +2405,9 @@ def main():
         if mode in ("vsteam", "vsip", "vscode", "vslevel"):
             mode, buf = None, ""
         if text:
-            flash(text, secs)
+            flash(text, secs, style)
 
-    def close_tour(text="", secs=5):
+    def close_tour(text="", secs=5, style=HI):
         """Sale del torneo (el organizador lo cierra para todos)."""
         nonlocal tour, director, mc
         if scene and isinstance(scene.net, pn.MatchSession):
@@ -2208,7 +2418,7 @@ def main():
             tour.close()
         tour = director = mc = None
         if text:
-            flash(text, secs)
+            flash(text, secs, style)
 
     def to_referee(msg):
         """Lo que manda el organizador cuando pelea (su MatchClient): directo al árbitro, sin red."""
@@ -2258,7 +2468,7 @@ def main():
             try:
                 names = partial_team(typed, walking, vs.rules["size"], vs.rules)
             except (OSError, ValueError) as e:         # sin la lista de especies: que lo complete el árbitro
-                flash(f"Se acabó el tiempo y no pude completar tu equipo: {e}", 6)
+                flash(f"Se acabó el tiempo y no pude completar tu equipo: {e}", 6, BAD)
                 return
             vs.stage = "loading"
             flash("Se acabó el tiempo: tu equipo se completa al azar...", 30)
@@ -2274,7 +2484,7 @@ def main():
         except ValueError:
             port = -1
         if not host or not 0 < port < 65536:
-            flash("Escribí la IP del amigo (ej. 192.168.1.20)", 4)
+            flash("Escribí la IP del amigo (ej. 192.168.1.20)", 4, WARN)
         elif vs:
             vs.connect(host, port)
 
@@ -2335,7 +2545,7 @@ def main():
                                             job[1].names if job[1].side is None else None)
                         flash("", 0)
                 elif job[0] == "vserror":                       # falló el equipo: reabrir el prompt con lo escrito
-                    flash(job[1], job[2])
+                    flash(job[1], job[2], BAD)
                     if vs and getattr(vs, "auto", False):       # torneo sin tiempo: lo completa el árbitro
                         vs.stage = "waiting"
                     elif vs and mode is None and not getattr(vs, "sent", False):
@@ -2343,10 +2553,10 @@ def main():
                         mode, buf, prompt_err = "vsteam", last_input.get("vsteam", ""), job[1].rsplit(": ", 1)[-1]
                         cur = len(buf)
                 elif job[0] == "vsfatal":
-                    close_vs(job[1], job[2])
+                    close_vs(job[1], job[2], BAD)
                 else:                                          # "flash" | "error" | "berror" | "ierror"
                     battling = battling and job[0] not in ("berror", "gerror")
-                    flash(job[1], job[2])
+                    flash(job[1], job[2], BAD if job[0].endswith("error") else HI)
                     again = {"berror": "battle", "ierror": "info"}.get(job[0])
                     if again and mode is None and not scene:    # falló un nombre: reabrir con lo escrito, para corregir
                         mode, buf, prompt_err = again, last_input.get(again, ""), job[1].rsplit(": ", 1)[-1]
@@ -2362,9 +2572,9 @@ def main():
                 save([p.name for p in pets])
                 redraw = True
                 if errors:
-                    flash("No pude: " + " | ".join(errors), 6)
+                    flash("No pude: " + " | ".join(errors), 6, BAD)
                 elif ok:
-                    flash("Listo: " + ", ".join(n for n, _ in ok), 2)
+                    flash(f"{OK_MARK} Listo: " + ", ".join(n for n, _ in ok), 2, GOOD)
 
             # --- comandos de la otra terminal
             tnow = time.time()
@@ -2388,13 +2598,13 @@ def main():
                     tour = ev[1]
                     close_vs()
                 elif ev and ev[0] == "error":
-                    close_vs(ev[1], 6)
+                    close_vs(ev[1], 6, BAD)
             # --- torneo: la sala y las peleas (el organizador las arbitra; todos las juegan o las miran)
             if tour:
                 tevs = tour.update()
                 for ev in tevs:
                     if ev[0] == "error":
-                        close_tour(ev[1], 6)
+                        close_tour(ev[1], 6, BAD)
                         break
                     if ev[0] == "start":
                         send = to_referee if tour.role == "host" else tour.send
@@ -2416,7 +2626,7 @@ def main():
                 if tour and tour.bracket and tour.bracket["champ"] not in (None, pn.EMPTY) \
                         and not getattr(tour, "cheered", False):
                     tour.cheered = True                 # una vez: el campeón, para todos
-                    flash(f"¡{tour.name_of(tour.bracket['champ'])} es el campeón del torneo!", 10)
+                    flash(f"¡{tour.name_of(tour.bracket['champ'])} es el campeón del torneo!", 10, GOOD)
                 team_timeout()
             # --- teclado
             typed = keys.read()
@@ -2461,8 +2671,13 @@ def main():
                     gym_key(ch)
                     continue
                 if dex:
-                    dex_key(ch)
-                    continue
+                    buf, act = dex.key(ch, buf)
+                    cur = len(buf)
+                    if act == "close":
+                        dex = None
+                    if act != "submit":
+                        continue
+                    dex, ch = None, "\r"                      # Enter solo en la lista: lo mismo que Enter en el prompt
                 if mode:
                     cur = min(cur, len(buf))
                     if mode in DEX_MODES and (ch == "\t" or (mode == "add" and ch in ("\r", "\n") and not buf.strip())):
@@ -2520,10 +2735,9 @@ def main():
                                 prompt_err = "Ese código no es válido: son 8 letras o números, como PIKA-7F3K-92QD"
                                 continue
                         elif parts:
-                            parts, cut = expand_ranges(parts)
+                            parts = expand_ranges(parts)
                             loader.request(parts, replace=(mode == "set"))
-                            note = f"   (máximo {MAX_PER_ADD} por vez: quedaron {cut} afuera)" if cut else ""
-                            flash("Cargando " + ", ".join(parts) + "..." + note, 30)
+                            flash("Cargando " + (f"{len(parts)}: " if len(parts) > 1 else "") + ", ".join(parts) + "...", 30)
                         mode, buf = None, ""
                     elif ch == "\x1b":
                         if mode == "vsteam":                      # ya estabas en la sala: Esc = salir de ella
@@ -2567,7 +2781,7 @@ def main():
                         gym = {"stage": 0}
                     elif c == "v":
                         if battling:
-                            flash("Esperá a que termine de prepararse la batalla", 3)
+                            flash("Esperá a que termine de prepararse la batalla", 3, WARN)
                         else:
                             vs = pn.Versus(pn.player_name())
                     elif c == "h" and pets:
@@ -2607,17 +2821,18 @@ def main():
                 block = gym_block(avail)
                 status = None if block else status_line(gym_text(), cols, True)
             elif dex:
-                block = dex_block(avail)
-                status = None if block else status_line(dex_text(), cols, True)
+                block = dex.lines(cols, avail, buf)
             elif mode:
-                label = f"{prompt_err}  →  corregí y Enter (Esc cancela)" if prompt_err else PROMPTS[mode]
+                label = f"{NO_MARK} {prompt_err}  →  corregí y Enter (Esc cancela)" if prompt_err else PROMPTS[mode]
+                secs = vs.secs_left() if mode == "vsteam" and getattr(vs, "tour_match", False) else None
                 if mode == "vsteam" and vs and not prompt_err:
-                    kind = "vsteam_tour" if getattr(vs, "tour_match", False) else "vsteam_again" if vs.prev_team else "vsteam"
+                    kind = "vsteam_tour" if secs is not None else "vsteam_again" if vs.prev_team else "vsteam"
                     label = PROMPTS[kind].format(peer=vs.peer, rules=pn.rules_text(vs.rules), size=vs.rules["size"],
-                                                 secs=vs.secs_left() if kind == "vsteam_tour" else "")
-                elif mode == "vsteam" and getattr(vs, "tour_match", False):
-                    label += f" · quedan {vs.secs_left()} s"
-                status = prompt_line(label, buf, cur, cols)
+                                                 secs=secs if secs is not None else "")
+                elif secs is not None:
+                    label += f" · quedan {secs} s"
+                style = BAD if prompt_err else clock_style(secs) if secs is not None and secs <= 15 else HI
+                status = prompt_line(label, buf, cur, cols, style)
                 if mode in ("add", "set") and not prompt_err and avail >= 2:
                     line = add_preview()
                     if line:
@@ -2627,7 +2842,7 @@ def main():
                 block = picker.lines(cols, avail - (1 if left is not None else 0))
                 if block and left is not None:           # torneo: el reloj de los ataques arriba
                     block = [seg([(f"Quedan {left} s para elegir los ataques (si se acaba, quedan los sorteados)",
-                                   WARN)], max(10, cols - 1))] + block
+                                   clock_style(left))], max(10, cols - 1))] + block
                 status = None if block else status_line(
                     (f"[{left} s] " if left is not None else "") + picker.text(cols), cols, True)
             elif tour:
@@ -2637,7 +2852,7 @@ def main():
                 block = room_block(vs.view(), avail)
                 status = None if block else status_line(vs.text(), cols, True)
             elif time.time() < msg_until:
-                status = status_line(msg, cols, True)
+                status = "\x1b[1;1H\x1b[2K" + seg([(msg, msg_style)], max(10, cols - 1))
             else:
                 block = idle_block(avail, talking)
             if block:

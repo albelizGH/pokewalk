@@ -34,7 +34,8 @@ py install.py --keys alt+shift+k   # otro atajo
 
 | Tecla | Qué hace |
 |---|---|
-| `a` | agregar: nombre, número o rango (`1-10`, máximo 10 por vez) + Enter. `Tab` (o Enter solo) abre una lista por región (Kanto, Johto...): cada uno aparece con su número de Pokédex: tipeá el número (o parte del nombre) y Enter, `←` `→` cambian de página, Backspace vuelve. Un rango como `257-260` muestra justo esos números (de cualquier región) y Enter los escribe todos (máximo 10). La lista con `Tab` también anda al cambiar todos (`c`), en batallas (`b`), info (`i`) y al armar el equipo del versus: lo que elegís se escribe en el prompt y, salvo en info, la lista sigue abierta para elegir otro (Esc vuelve al prompt). Mientras escribís en `a`/`c`, abajo se ve qué se va a agregar (`¿pikahcu?` = no lo conozco) |
+| `a` | agregar: nombre, número o rango (`152-160`, sin tope) + Enter. Mientras escribís, abajo se ve qué se va a agregar y cuántos (`✗ no conozco: ¿pikahcu?` = ese no se agrega). `Tab` (o Enter solo) abre la **lista por región** (ver abajo) |
+| `Tab` | **lista por región** (en `a`, `c`, `b`, `i` y el equipo del versus): elegís la región con su número y tipeás un número de Pokédex, parte del nombre (si en esa región no hay, busca en todas) o un **rango** como `162-178` (de cualquier región; mientras escribís el final la lista no salta). Arriba dice qué hace Enter (`Enter elige los 17`) y Enter los elige **todos**: quedan marcados con `✓`, la fila de arriba muestra lo elegido hasta ahora (`Para agregar (17): furret, hoothoot … xatu`) y podés buscar otro para sumar más. **Enter solo = listo**: agrega (o cambia, pelea, manda el equipo) sin volver al prompt; Esc vuelve al prompt con todo escrito. `←` `→` cambian de página, Backspace borra la búsqueda (y después vuelve a las regiones). En la batalla `Tab` escribe el `vs` (lo que sigue es el rival; si no elegís rival, va al azar). En el versus, los que la sala no permite salen con `✗` y en gris y no se eligen, y nunca entran más que los de la sala. En info elegís uno y vuelve al prompt |
 | `c` | cambiar todos: varios separados por espacio + Enter |
 | `x` | sacar: nombre, número o el principio del nombre (`pika`) + Enter. Enter solo saca el último |
 | `r` | agregar uno al azar |
@@ -42,6 +43,13 @@ py install.py --keys alt+shift+k   # otro atajo
 | `Esc` | cancelar lo que estás escribiendo |
 
 Los nombres van en inglés (`charmander`, `bulbasaur`) o por número de Pokédex.
+
+No hay tope de cuántos agregar, pero cada Pokémon distinto que camina ocupa **unos 6 MB de memoria** (con `--scale 2`;
+el mismo Pokémon repetido no suma): 20 son ~120 MB, toda Kanto (`1-151`) ~900 MB. También tarda en bajar los sprites la
+primera vez (después quedan en caché).
+
+Colores: las teclas van en cian, lo elegido en verde con `✓`, lo que no se puede en rojo con `✗` y los avisos y relojes
+en amarillo (en rojo los últimos 5 segundos). Usan los colores de tu tema, así que se leen en fondo claro u oscuro.
 
 ## Reaccionan a tus comandos (solo PowerShell)
 
@@ -118,7 +126,7 @@ Los dos tienen que tener pokewalk (la misma versión) y estar en la misma red Wi
    - **Míticos**: los de evento (Mew, Celebi, Jirachi, Arceus...).
    Salen de PokeAPI (`is_legendary` / `is_mythical`). Los ultraentes y los Pokémon paradoja no vienen marcados ahí, así
    que entran siempre. En la lista por región (Tab) los legendarios llevan `★` y los míticos `✦`; si la sala no los
-   deja, salen en gris.
+   deja, salen en gris y con `✗` (y no se pueden elegir).
 2. **Cada uno arma su equipo en la sala**: hasta el tamaño de la sala, solo nombres o números (`pika char`; el nivel lo
    fija la sala, así que `pika:60` da error; Enter solo = los que caminan, hasta el tamaño de la sala; si no camina
    ninguno, al azar entre los que la sala permite). Un legendario o mítico que la sala no deja da error y se corrige

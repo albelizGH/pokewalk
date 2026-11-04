@@ -758,40 +758,40 @@ class Versus:
             if self.noperm:
                 title = "⚠ Sin permiso de Windows (salí y entrá de nuevo y aceptá el aviso) · " + title
             if st == "menu":
-                return {"title": title, "warn": self.noperm, "foot": "Esc cancela",
+                return {"title": title, "warn": self.noperm, "foot": "Esc  cancela",
                         "items": [("1", "En tu red (misma casa o mismo Wi-Fi)"),
                                   ("2", "Por internet, con un código (amigos fuera de tu red)")]}
-            return {"title": title, "warn": self.noperm, "foot": "0  volver      Esc cancela",
+            return {"title": title, "warn": self.noperm, "foot": "0  volver      Esc  cancela",
                     "items": [("1", "Crear sala"),
                               ("2", f"Crear torneo ({MIN_PLAYERS}-{MAX_PLAYERS} jugadores)"),
                               ("3", "Buscar salas (si no aparece, ahí podés escribir la IP)")]}
         if st == "net":
             return {"title": "Por internet: sin instalar nada (pasa por un servidor público gratuito)",
-                    "foot": "0  volver      Esc cancela",
+                    "foot": "0  volver      Esc  cancela",
                     "items": [("1", "Crear sala (te doy un código para tu amigo)"),
                               ("2", f"Crear torneo ({MIN_PLAYERS}-{MAX_PLAYERS} jugadores)"),
                               ("3", "Unirse con un código")]}
         if st == "size":
             what = self._what()
-            return {"title": f"{what}: ¿de cuántos Pokémon los equipos?", "foot": "0  volver      Esc cancela",
+            return {"title": f"{what}: ¿de cuántos Pokémon los equipos?", "foot": "0  volver      Esc  cancela",
                     "items": [(str(n), f"{n} Pokémon") for n in range(1, MAX_TEAM + 1)]}
         if st == "special":
             what = self._what()
             return {"title": f"{what} · {self.size} Pokémon · nivel {self.level}: ¿legendarios y míticos?",
-                    "foot": "Enter  1      0  volver      Esc cancela", "items": list(SPECIAL_OPTS)}
+                    "foot": "Enter  1      0  volver      Esc  cancela", "items": list(SPECIAL_OPTS)}
         if st == "hosting" and self.relay:
             return {"title": f"Sala por internet · código  {self.room.code}  · {rules_text(self.rules)}", "items": [],
                     "warn": True,
                     "foot": "Pasale el código a tu amigo: él entra con v → 2 → 3 «Unirse con un código»      "
-                            "Esc cierra la sala"}
+                            "Esc  cierra la sala"}
         if st == "hosting":
             ips = ", ".join(self.room.ips) if self.room and self.room.ips else "la de esta compu"
             return {"title": f"Sala «{self.name}» abierta ({rules_text(self.rules)}) · esperando a un amigo...",
                     "items": [],
-                    "foot": f"Tu amigo la ve en «Buscar salas», o conecta por IP a {ips}      Esc cierra la sala"}
+                    "foot": f"Tu amigo la ve en «Buscar salas», o conecta por IP a {ips}      Esc  cierra la sala"}
         if st == "browsing":
             rooms = self.finder.rooms()[:9] if self.finder else []
-            foot = "¿No aparece la sala?  i  escribí su IP      0  volver      Esc cancela"
+            foot = "¿No aparece la sala?  i  escribí su IP      0  volver      Esc  cancela"
             if not rooms:
                 return {"title": "Buscando salas en tu red...", "items": [], "foot": foot}
             return {"title": "Salas en tu red:", "foot": foot,
