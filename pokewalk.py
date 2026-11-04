@@ -35,6 +35,7 @@ import signal
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from array import array
@@ -50,6 +51,9 @@ import pokeconfig as pc
 import pokenet as pn
 
 SPRITE_URL = "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/sprite/{id:04d}/{file}"
+SHINY_DIR = "0000/0001/"        # PMDCollab: la versión shiny de cada Pokémon (forma 0000, shiny 0001)
+SHINY_ODDS = 50                 # 1 de cada 50 que se agregan (o salen al azar en un equipo) es shiny
+SPARK = "✨"                     # al lado del nombre de un shiny (★ es legendario). Ocupa 2 columnas: ver `tw`
 SPECIES_URL = "https://raw.githubusercontent.com/PokeAPI/pokeapi/master/data/v2/csv/pokemon_species.csv"
 DEFAULT = ["pikachu", "charmander", "squirtle"]
 
@@ -85,9 +89,9 @@ _species_lock = threading.Lock()
 
 
 def resolve(name):
-    """Nombre o número -> (dex, nombre). Lanza ValueError si no existe."""
+    """Nombre o número -> (dex, nombre). Lanza ValueError si no existe. Un `*` al final (shiny) no cuenta."""
     global _species
-    name = name.strip().lower()
+    name = name.strip().lower().rstrip("*")
     with _species_lock:
         if _species is None:
             raw = fetch(SPECIES_URL, "species.csv").decode("utf-8")
@@ -136,6 +140,34 @@ def random_allowed(n, rules=None, top=493):
     return [str(d) for d in random.sample(pool, min(n, len(pool)))]
 
 
+# --------------------------------------------------------------------------- shiny
+# Un shiny es lo que escribió el usuario con un `*` al final (`pikachu*`, `25*`, `1-10*` = todos): así viaja por los
+# prompts, la lista guardada y los equipos, y `resolve` lo ignora. Solo cambia los colores del sprite y suma ✨.
+def split_shiny(term):
+    """`pikachu*` -> ("pikachu", True); `pikachu` -> ("pikachu", False). Un `*` solo no es un nombre."""
+    t = term.strip()
+    return (t.rstrip("*"), True) if len(t) > 1 and t.endswith("*") else (t, False)
+
+
+def roll_shiny(rng=random):
+    return rng.randrange(SHINY_ODDS) == 0
+
+
+def roll_term(term, rng=random):
+    """Lo que se agrega o sale al azar: 1 de cada SHINY_ODDS queda shiny (si no lo era ya)."""
+    return term + "*" if not split_shiny(term)[1] and roll_shiny(rng) else term
+
+
+def pet_terms(pets):
+    """Los que caminan como términos (`pikachu*` si es shiny): para guardarlos y para armar equipos con ellos."""
+    return [p.name + ("*" if getattr(p, "shiny", False) else "") for p in pets]
+
+
+def shiny_name(x):
+    """Nombre para mostrar (de un Pokémon que camina o pelea): con ✨ si es shiny."""
+    return x.name + (" " + SPARK if getattr(x, "shiny", False) else "")
+
+
 def load_saved():
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
@@ -155,8 +187,15 @@ def save(names):
 
 
 # --------------------------------------------------------------------------- sprites
-def load_anim(dex, anim_name, anims_xml):
-    anims = {a.findtext("Name"): a for a in anims_xml.iter("Anim")}
+def sprite_file(dex, file, shiny=False):
+    """(url, nombre en el caché) de un archivo de PMDCollab. Los shiny van en su carpeta (`0025/0000/0001/...`),
+    como en el repo: así no se mezclan con los de siempre."""
+    file = (SHINY_DIR if shiny else "") + file
+    return SPRITE_URL.format(id=dex, file=file), f"{dex:04d}/{file}"
+
+
+def load_anim(dex, anim_name, anims_xml, shiny=False):
+    anims ={a.findtext("Name"): a for a in anims_xml.iter("Anim")}
     a = anims.get(anim_name)
     if a is None:
         return None
@@ -167,9 +206,7 @@ def load_anim(dex, anim_name, anims_xml):
             return None
     fw, fh = int(a.findtext("FrameWidth")), int(a.findtext("FrameHeight"))
     durs = [int(d.text) / 60 for d in a.iter("Duration")]   # PMD: 60 ticks/s
-    sheet = Image.open(io.BytesIO(fetch(
-        SPRITE_URL.format(id=dex, file=f"{anim_name}-Anim.png"),
-        f"{dex:04d}/{anim_name}-Anim.png"))).convert("RGBA")
+    sheet = Image.open(io.BytesIO(fetch(*sprite_file(dex, f"{anim_name}-Anim.png", shiny)))).convert("RGBA")
 
     rows = sheet.height // fh                       # algunas (Sleep, Faint...) no tienen 8 direcciones
     r_right = ROW_RIGHT if rows > ROW_RIGHT else 0
@@ -212,18 +249,30 @@ def pack_pixels(rgba, pal, index):
 
 
 class Sprite:
-    def __init__(self, dex, scale, battle=False):
-        xml = ET.fromstring(fetch(SPRITE_URL.format(id=dex, file="AnimData.xml"), f"{dex:04d}/AnimData.xml"))
-        walk = load_anim(dex, "Walk", xml)
+    def __init__(self, dex, scale, battle=False, shiny=False):
+        """`shiny`: con los colores shiny de PMDCollab. Si ese Pokémon no los tiene (404 en su AnimData, la caminata
+        o el idle), se arma con los de siempre sin avisar: sigue siendo shiny (✨), solo que se ve normal
+        (`shiny_art` dice cuál quedó)."""
+        try:
+            self._build(dex, scale, battle, shiny)
+        except urllib.error.HTTPError as e:
+            if not (shiny and e.code == 404):
+                raise
+            self._build(dex, scale, battle, False)
+
+    def _build(self, dex, scale, battle, shiny):
+        self.shiny_art = shiny
+        xml = ET.fromstring(fetch(*sprite_file(dex, "AnimData.xml", shiny)))
+        walk = load_anim(dex, "Walk", xml, shiny)
         if walk is None:
             raise ValueError("no tiene animación de caminata")
-        idle = load_anim(dex, "Idle", xml) or ([walk[0][0]], [walk[1][0]], [1.0], None)
+        idle = load_anim(dex, "Idle", xml, shiny) or ([walk[0][0]], [walk[1][0]], [1.0], None)
 
         extra = {}                                  # solo en batalla: bajar estas hojas para los demás sería gastar de más
         for code, names in (BATTLE_ANIMS.items() if battle else ()):
             for n in names:
                 try:
-                    got = load_anim(dex, n, xml)
+                    got = load_anim(dex, n, xml, shiny)
                 except Exception:                   # la hoja figura pero no se pudo bajar: probar la siguiente
                     got = None
                 if got:
@@ -277,7 +326,7 @@ class Pet:
     lift = 0                                        # píxeles por encima del piso (los efectos flotan)
 
     def __init__(self, name, sprite, width, speed_mult=1.0):
-        self.name = name
+        self.name, self.shiny = split_shiny(name)   # `pikachu*` (lo que devuelve el Loader) = shiny
         self.s = sprite
         self.hold = False                           # congelar en el último cuadro (debilitado)
         self.x = random.uniform(0, max(1, width - sprite.w))
@@ -390,17 +439,20 @@ class Loader:
         self.done = queue.Queue()
         self.busy = 0
         self.progress = None    # (cuántos van, total, nombre) de la última carga de varios, para "Cargando 23/151: …"
+        self.lucky = queue.Queue()  # los que salieron shiny al azar (para el "¡Salió un ... shiny!"), antes de `done`
 
     def set_scale(self, scale):
         """Otra escala (tecla o): los sprites, caminando y de batalla, se vuelven a armar cuando se piden."""
         self.scale, self.cache = scale, {}
 
-    def request(self, names, replace):
+    def request(self, names, replace, roll=False):
+        """`roll`: son nuevos (agregar, cambiar, azar), así que cada uno tiene su 1/SHINY_ODDS de salir shiny. Los que
+        ya caminaban (la lista guardada, otra escala) vuelven tal cual."""
         self.busy += 1
         self.progress = None
-        threading.Thread(target=self._work, args=(names, replace), daemon=True).start()
+        threading.Thread(target=self._work, args=(names, replace, roll), daemon=True).start()
 
-    def _work(self, names, replace):
+    def _work(self, names, replace, roll=False):
         ok, errors = [], []
         many = len(names) > 1
         scale, cache = self.scale, self.cache       # si cambian la escala a mitad de camino, esta carga no ensucia la nueva
@@ -408,12 +460,18 @@ class Loader:
             try:
                 if many:
                     self.progress = (i, len(names), n)
-                dex, key = resolve(n)
+                base, shiny = split_shiny(n)
+                dex, key = resolve(base)
                 if many:
                     self.progress = (i, len(names), key)        # ya con el nombre (si escribió un número)
-                if dex not in cache:
-                    cache[dex] = Sprite(dex, scale)
-                ok.append((key, cache[dex]))
+                lucky = roll and not shiny and roll_shiny()
+                shiny = shiny or lucky
+                ck = (dex, "shiny") if shiny else dex
+                if ck not in cache:
+                    cache[ck] = Sprite(dex, scale, shiny=True) if shiny else Sprite(dex, scale)
+                ok.append((key + ("*" if shiny else ""), cache[ck]))
+                if lucky:
+                    self.lucky.put(key)
             except Exception as e:  # red, nombre inválido, sprite faltante...
                 errors.append(f"{n}: {e}")
         if many:
@@ -753,7 +811,7 @@ def find_pet(pets, term):
         return None
     if term is None:
         return len(pets) - 1
-    term = term.lower()
+    term = split_shiny(term.lower())[0]
     key = term
     if term.isdigit():
         try:
@@ -768,8 +826,8 @@ def find_pet(pets, term):
 
 
 PROMPTS = {
-    "add": "Agregar (nombre, número o rango como 152-160, Enter;  Tab o Enter solo = lista por región)",
-    "set": "Cambiar todos (separados por espacio o un rango como 1-6, Enter;  Tab = lista por región)",
+    "add": "Agregar (nombre, número o rango como 152-160; con * al final, shiny: pikachu*; Enter;  Tab o Enter solo = lista por región)",
+    "set": "Cambiar todos (separados por espacio o un rango como 1-6; pikachu* = shiny; Enter;  Tab = lista por región)",
     "del": "Sacar (nombre, número o principio del nombre; Enter solo = el último)",
     "battle": "Batalla (pika char = 1 vs 1;  pika char vs mew snor = equipos;  Enter solo = 3 vs 3 al azar;  Tab = lista, y en ella Tab = el rival)",
     "pet": "Mimar a (nombre, número o principio; Enter solo = uno al azar)",
@@ -825,7 +883,7 @@ def status_line(text, cols, bright=False, code=""):
     if code and code in text:
         a, _, b = text.partition(code)
         return "\x1b[1;1H\x1b[2K" + seg([(a, style), (code, CODE), (b, style)], max(1, cols - 1))
-    text = text[:max(0, cols - 1)]
+    text = cut(text, max(0, cols - 1))
     return f"\x1b[1;1H\x1b[2K{style}{text}\x1b[0m"
 
 
@@ -838,8 +896,23 @@ def rgb(c):
     return "\x1b[38;2;%d;%d;%dm" % c
 
 
+def tw(text):
+    """Columnas que ocupa `text` en la terminal: la ✨ de los shiny ocupa 2 (el resto de lo que se dibuja, 1)."""
+    return len(text) + text.count(SPARK)
+
+
+def cut(text, width):
+    """El principio de `text` que entra en `width` columnas (sin partir una ✨ a la mitad)."""
+    if tw(text) <= width:
+        return text
+    out = text[:max(0, width)]
+    while tw(out) > width:
+        out = out[:-1]
+    return out
+
+
 def plen(parts):
-    return sum(len(t) for t, _ in parts)
+    return sum(tw(t) for t, _ in parts)
 
 
 def seg(parts, width):
@@ -848,11 +921,11 @@ def seg(parts, width):
     for text, style in parts:
         if used >= width:
             break
-        text = text[:width - used]
+        text = cut(text, width - used)
         if not text:                    # un segmento vacío (una marca que no va) no corta lo que sigue
             continue
         out.append(f"{style}{text}\x1b[0m" if style else text)
-        used += len(text)
+        used += tw(text)
     return "".join(out) + " " * max(0, width - used)
 
 
@@ -1078,13 +1151,15 @@ PET_LINES = ["<3", "¡Hola!", "¿Jugamos?", "¡Me encanta caminar!", "¡Qué lin
 
 def expand_ranges(parts):
     """`1-10 pikachu` -> ['1', ..., '10', 'pikachu'] (números de Pokédex; `ho-oh` sigue siendo un nombre y `10-1`
-    vale como `1-10`). Sin tope: cada Pokémon que camina ocupa unos 0,2 MB (ver el README)."""
+    vale como `1-10`). `1-10*` = todos shiny (`1*` ... `10*`). Sin tope: cada Pokémon que camina ocupa unos 0,2 MB
+    (ver el README)."""
     out = []
     for term in parts:
-        a, sep, b = term.partition("-")
+        base, shiny = split_shiny(term)
+        a, sep, b = base.partition("-")
         if sep and a.isdigit() and b.isdigit():
             lo, hi = sorted((int(a), int(b)))
-            out += [str(n) for n in range(lo, hi + 1)]
+            out += [str(n) + ("*" if shiny else "") for n in range(lo, hi + 1)]
         else:
             out.append(term)
     return out
@@ -1092,30 +1167,40 @@ def expand_ranges(parts):
 
 def expand_name(term, walking):
     """Nombre completo para lo que escribió el usuario: un nombre o número válido se respeta tal cual
-    (así `mew` no se confunde con `mewtwo`); si no, vale el principio del nombre de uno que camina (`pika`)."""
-    t = term.strip().lower()
-    if t in walking:
-        return t
+    (así `mew` no se confunde con `mewtwo`); si no, vale el principio del nombre de uno que camina (`pika`).
+    `walking` son términos (`pikachu*` si es shiny): el que camina pelea como camina, y un `*` lo hace shiny."""
+    t, shiny = split_shiny(term.strip().lower())
+    star = "*" if shiny else ""
+    plain = {split_shiny(n)[0]: n for n in walking}
+    if t in plain:
+        return plain[t] if not shiny else t + star
     try:
         resolve(t)
-        return t
+        return t + star
     except Exception:
         pass
-    return next((n for n in reversed(walking) if n.startswith(t)), t)
+    hit = next((n for n in reversed(walking) if n.startswith(t)), None)
+    return t + star if hit is None else split_shiny(hit)[0] + "*" if shiny else hit
 
 
-def battle_sprite(loader, dex):
-    """Sprite con las animaciones de combate (se baja una sola vez)."""
-    if (dex, "batalla") not in loader.cache:
-        loader.cache[(dex, "batalla")] = Sprite(dex, loader.scale, battle=True)
-    return loader.cache[(dex, "batalla")]
+def battle_sprite(loader, dex, shiny=False):
+    """Sprite con las animaciones de combate (se baja una sola vez; el shiny aparte)."""
+    k = (dex, "batalla", "shiny") if shiny else (dex, "batalla")
+    if k not in loader.cache:
+        loader.cache[k] = Sprite(dex, loader.scale, battle=True, shiny=True) if shiny else \
+            Sprite(dex, loader.scale, battle=True)
+    return loader.cache[k]
 
 
 def build_fighter(spec, loader, walking=()):
-    """(nombre, nivel) -> (Fighter, sprite). Bloquea: busca stats y ataques en PokeAPI y baja el sprite."""
+    """(nombre, nivel) -> (Fighter, sprite). Bloquea: busca stats y ataques en PokeAPI y baja el sprite.
+    `nombre*` = shiny (solo el sprite y la ✨)."""
     name, level = spec
-    dex, key = resolve(expand_name(name, walking))
-    return pb.load_fighter(fetch, dex, key, level), battle_sprite(loader, dex)
+    term = expand_name(name, walking)
+    dex, key = resolve(term)
+    f = pb.load_fighter(fetch, dex, key, level)
+    f.shiny = split_shiny(term)[1]
+    return f, battle_sprite(loader, dex, f.shiny)
 
 
 def build_battle(sides, loader, walking=()):
@@ -1153,7 +1238,7 @@ def prepare_gym_battle(trainer, mine, loader, jobs):
         battle, sprites = build_battle(
             [list(zip(mine, mine_levels)), [(str(p["dex"]), p["nivel"]) for p in foes]], loader, mine)
         intro = [f"¡{trainer['nombre']} quiere combatir!   (nivel medio del rival: {avg})",
-                 "Tu equipo: " + " · ".join(f"{f.name} Nv{f.level}" for f in battle.teams[0])]
+                 "Tu equipo: " + " · ".join(f"{shiny_name(f)} Nv{f.level}" for f in battle.teams[0])]
         jobs.put(("battle", battle, sprites, intro, "gym"))
     except Exception as e:
         jobs.put(("gerror", f"No pude preparar el combate: {e}", 6))
@@ -1184,7 +1269,7 @@ def parse_vs_team(parts, walking, size, rules=None):
         problem = pn.rule_problem(dex, pb.pretty(key), rules)
         if problem:
             raise ValueError(problem + ("" if parts else " (camina con vos: escribí tu equipo)"))
-    return names or random_allowed(size, rules)
+    return names or [roll_term(d) for d in random_allowed(size, rules)]
 
 
 def partial_team(parts, walking, size, rules=None):
@@ -1193,28 +1278,30 @@ def partial_team(parts, walking, size, rules=None):
     Nada escrito = todo al azar (los que caminan no cuentan: no los eligió). Siempre devuelve `size` nombres."""
     keep, seen = [], set()
     for term in parts:
-        name = term.partition(":")[0]
+        name = expand_name(term.partition(":")[0], walking)
         try:
-            dex, key = resolve(expand_name(name, walking))
+            dex, key = resolve(name)
         except (OSError, ValueError):
             continue
         if dex in seen or pn.rule_problem(dex, pb.pretty(key), rules):
             continue
         seen.add(dex)
-        keep.append(str(dex))
+        keep.append(str(dex) + ("*" if split_shiny(name)[1] else ""))
         if len(keep) == size:
             break
     fill = [d for d in random_allowed(size + len(keep), rules) if int(d) not in seen]
-    return keep + fill[:size - len(keep)]
+    return keep + [roll_term(d) for d in fill[:size - len(keep)]]
 
 
 def random_team(n, rules):
     """El árbitro del torneo (en un hilo): `n` Pokémon al azar que la sala permite, al nivel de la sala con su
-    handicap y los ataques sorteados (para el que no mandó su equipo a tiempo)."""
+    handicap y los ataques sorteados (para el que no mandó su equipo a tiempo). Como todo lo que sale al azar,
+    cada uno puede salir shiny."""
     out = []
     for d in random_allowed(n, rules):
         dex, key = resolve(d)
         out.append(pb.load_fighter(fetch, dex, key, handicap_level(rules["level"])))
+        out[-1].shiny = roll_shiny()
     return out
 
 
@@ -1241,9 +1328,11 @@ def load_my_team(names, loader, jobs, walking, level=pb.LEVEL):
     try:
         specs = [(name, handicap_level(level)) for name in names]
         def build(spec):
-            dex, key = resolve(expand_name(spec[0], walking))
+            term = expand_name(spec[0], walking)
+            dex, key = resolve(term)
             f, pool = pb.load_fighter(fetch, dex, key, spec[1], with_pool=True)
-            return f, pool, battle_sprite(loader, dex)
+            f.shiny = split_shiny(term)[1]
+            return f, pool, battle_sprite(loader, dex, f.shiny)
 
         with ThreadPoolExecutor(3) as ex:
             built = list(ex.map(build, specs))
@@ -1291,7 +1380,7 @@ class MovePicker:
         f, sel, pool = self.fighters[self.i], self.sel[self.i], self.pools[self.i]
         items = [self._cell(n + 1, k, pool[k]) for n, k in enumerate(pages[self.page])]
         last = self.i == len(self.fighters) - 1
-        title = [(f"{f.name} Nv{f.level}", HI), (f"  ({self.i + 1}/{len(self.fighters)})   elegidos {len(sel)}/4: ", DIM),
+        title = [(f"{shiny_name(f)} Nv{f.level}", HI), (f"  ({self.i + 1}/{len(self.fighters)})   elegidos {len(sel)}/4: ", DIM),
                  (", ".join(pool[k].name for k in sel) or "ninguno (marcá al menos uno)", GOOD if sel else WARN)]
         foot = [("1-9", KEY), (" marcar   ", DIM), ("←→", KEY), (f" página {self.page + 1}/{len(pages)}   ", DIM),
                 ("Enter", KEY), (" listo   " if last else " siguiente Pokémon   ", DIM), ("r", KEY), (" al azar", DIM)]
@@ -1325,7 +1414,7 @@ class MovePicker:
         self.page = min(self.page, len(pages) - 1)
         items = "  ".join(self._label(n + 1, k, self.pools[self.i][k]) for n, k in enumerate(pages[self.page]))
         last = self.i == len(self.fighters) - 1
-        return (f"{f.name} Nv{f.level} ({self.i + 1}/{len(self.fighters)}) {len(self.sel[self.i])}/4 · {items} · "
+        return (f"{shiny_name(f)} Nv{f.level} ({self.i + 1}/{len(self.fighters)}) {len(self.sel[self.i])}/4 · {items} · "
                 f"pág {self.page + 1}/{len(pages)} ←→  Enter {'listo' if last else 'sigue'}  r azar")
 
     def key(self, ch, cols):
@@ -1356,7 +1445,7 @@ class MovePicker:
 def prepare_versus(vs, loader, jobs):
     """Hilo (versus): con los dos equipos ya en la mano, baja los sprites del rival y arma la batalla."""
     try:
-        foe_sprites = [battle_sprite(loader, f.dex) for f in vs.foe]
+        foe_sprites = [battle_sprite(loader, f.dex, f.shiny) for f in vs.foe]
         chart = pb.TypeChart(fetch)
         chart.preload({m.type for team in (vs.my, vs.foe) for f in team for m in f.moves})
         battle = pb.Battle(vs.my, vs.foe, chart)            # el invitado juega sobre una copia espejo
@@ -1367,7 +1456,7 @@ def prepare_versus(vs, loader, jobs):
         session = (pn.HostSession if vs.role == "host" else pn.GuestSession)(battle, link, vs.peer)
         session.rules = vs.rules                            # la revancha sigue con las mismas reglas
         intro = [f"¡Versus! {vs.name} contra {vs.peer}   (sala: {pn.rules_text(vs.rules)} ±{VS_HANDICAP})",
-                 f"{len(vs.my)} contra {len(vs.foe)} · Tu equipo: " + " · ".join(f"{f.name} Nv{f.level}" for f in vs.my)]
+                 f"{len(vs.my)} contra {len(vs.foe)} · Tu equipo: " + " · ".join(f"{shiny_name(f)} Nv{f.level}" for f in vs.my)]
         jobs.put(("vsbattle", battle, [vs.my_sprites, foe_sprites], intro, session))
     except Exception as e:
         jobs.put(("vsfatal", f"No pude preparar la batalla: {e}", 6))
@@ -1377,7 +1466,7 @@ def prepare_match(sess, loader, jobs):
     """Hilo (torneo): arrancó una pelea que jugás o mirás (`sess` = pokenet.MatchSession, que ya va juntando los
     turnos): baja los sprites de los dos equipos y la tabla de tipos, y avisa a la pantalla."""
     try:
-        sprites = [[battle_sprite(loader, f.dex) for f in team] for team in sess.b.teams]
+        sprites = [[battle_sprite(loader, f.dex, f.shiny) for f in team] for team in sess.b.teams]
         sess.b.chart.preload({m.type for team in sess.b.teams for f in team for m in f.moves})
         left, right = sess.names
         rules = f"(sala: {pn.rules_text(sess.rules)} ±{VS_HANDICAP})"
@@ -1385,7 +1474,7 @@ def prepare_match(sess, loader, jobs):
             intro = [f"Torneo: {left} contra {right}   {rules}", f"Mirás la pelea: {left} a la izquierda, {right} a la derecha"]
         else:
             intro = [f"¡Torneo! {left} contra {right}   {rules}",
-                     "Tu equipo: " + " · ".join(f"{f.name} Nv{f.level}" for f in sess.b.teams[0])]
+                     "Tu equipo: " + " · ".join(f"{shiny_name(f)} Nv{f.level}" for f in sess.b.teams[0])]
         jobs.put(("tmatch", sess, sprites, intro))
     except Exception as e:
         jobs.put(("flash", f"No pude preparar la pelea: {e}", 6))
@@ -1454,31 +1543,32 @@ def add_vs(buf):
 def fit_names(names, width, sep=", "):
     """`a, b, c` en `width` columnas; si no entran todos, los primeros, `…` y el último (`furret, hoothoot … xatu`)."""
     text = sep.join(names)
-    if len(text) <= width or len(names) < 2:
-        return text[:max(0, width)]
+    if tw(text) <= width or len(names) < 2:
+        return cut(text, width)
     for k in range(len(names) - 2, 0, -1):
         text = sep.join(names[:k]) + " … " + names[-1]
-        if len(text) <= width:
+        if tw(text) <= width:
             return text
-    return (names[0] + " … " + names[-1])[:max(0, width)]
+    return cut(names[0] + " … " + names[-1], width)
 
 
 def preview_terms(buf, species=None):
-    """Lo que agregaría Enter en add/set, sin red: [(número | None, nombre | término tal cual)]. Usa la lista de
-    especies ya bajada ({nombre: número}); None si todavía no está."""
+    """Lo que agregaría Enter en add/set, sin red: [(número | None, nombre | término tal cual)] (`pikachu ✨` si va
+    con `*`). Usa la lista de especies ya bajada ({nombre: número}); None si todavía no está."""
     species = _species if species is None else species
     if not species:
         return None
     terms = expand_ranges(buf.split())
     back = {v: k for k, v in species.items()}
     out = []
-    for t in terms:
-        t = t.strip().lower()
+    for term in terms:
+        t, shiny = split_shiny(term.lower())
+        mark = " " + SPARK if shiny else ""
         if t.isdigit():
-            out.append((int(t), back[int(t)]) if int(t) in back else (None, t))
+            out.append((int(t), back[int(t)] + mark) if int(t) in back else (None, term.strip().lower()))
         else:
             key = t.replace(".", "").replace("'", "")
-            out.append((species[key], key) if key in species else (None, t))
+            out.append((species[key], key + mark) if key in species else (None, term.strip().lower()))
     return out
 
 
@@ -1754,7 +1844,7 @@ class DexList:
         if picked and not head:                                             # sin fila propia: cuántos van
             mine, rival = self.sides(buf)
             title = title + [("   elegidos: ", DIM), (str(len(mine) + len(rival or [])), GOOD)]
-        mark = set(buf.lower().split())
+        mark = {split_shiny(t)[0] for t in buf.lower().split()}           # `pikachu*` (shiny) también está elegido
         cells = [self.cell(i, n, mark) for i, n in shown] or [[("(ninguno coincide)", DIM)]]
         cw = min(width // ncols, w + 2)
         rows = ["".join(seg(c, cw) for c in cells[r * ncols:(r + 1) * ncols]) for r in range(-(-len(cells) // ncols))]
@@ -1781,7 +1871,7 @@ class DexList:
         pages = max(1, -(-len(found) // self.per))
         self.page = min(self.page, pages - 1)
         shown = found[self.page * self.per:(self.page + 1) * self.per]
-        mark = set(buf.lower().split())
+        mark = {split_shiny(t)[0] for t in buf.lower().split()}           # `pikachu*` (shiny) también está elegido
         items = [p for i, n in shown for p in [("  ", "")] + self.cell(i, n, mark)]
         more = [(f"  {self.page + 1}/{pages}", DIM), (" ←→", KEY)] if pages > 1 else []
         return seg(title + have + [(" ", "")] + items + more + tail, width)
@@ -2230,9 +2320,10 @@ class BattleScene:
         return [p for p, h in zip(self.pets, self.hidden) if not h] + live
 
     # --- texto
-    def _bar(self, s, cols):
+    def _bar(self, s, cols, spark=True):
         team = self.b.teams[s]
         f = team[self.active[s]]
+        name = shiny_name(f) if spark else f.name
         hp = max(0, math.ceil(self.shown[s] - 1e-6))
         ratio = hp / f.max_hp
         bw = 8 if cols >= 90 else 5 if cols >= 60 else 3
@@ -2242,9 +2333,9 @@ class BattleScene:
         tag = (" " + pb.STATUS_TAG[st] if st else "") + (" CNF" if conf else "")
         right = f"] {hp}/{f.max_hp}"
         dots = [h > 0 for h in self.team_hp[s]]
-        plain = f"{f.name} Nv{f.level}{tag} [" + "█" * fill + "░" * (bw - fill) + right + \
+        plain = f"{name} Nv{f.level}{tag} [" + "█" * fill + "░" * (bw - fill) + right + \
             (" " + "●" * len(dots) if len(dots) > 1 else "")
-        ansi = (f"{HI}{f.name}\x1b[0m Nv{f.level}{WARN}{tag}\x1b[0m [\x1b[{color}m" + "█" * fill
+        ansi = (f"{HI}{name}\x1b[0m Nv{f.level}{WARN}{tag}\x1b[0m [\x1b[{color}m" + "█" * fill
                 + "\x1b[90m" + "░" * (bw - fill) + "\x1b[0m" + right)
         if len(dots) > 1:
             ansi += " " + "".join("\x1b[32m●" if d else "\x1b[90m○" for d in dots) + "\x1b[0m"
@@ -2272,7 +2363,7 @@ class BattleScene:
         parts = []
         for i, f in enumerate(b.teams[0]):
             state = " K.O." if f.hp <= 0 else " (en combate)" if i == b.active[0] else ""
-            parts.append(f"{i + 1} {f.name} Nv{f.level} {f.hp}/{f.max_hp}{state}")
+            parts.append(f"{i + 1} {shiny_name(f)} Nv{f.level} {f.hp}/{f.max_hp}{state}")
         return ("¡Elegí al próximo!  " if self.forced else "") + "  ".join(parts) + ("" if self.forced else "   0 volver")
 
     def _menu_cells(self, cols, avail):
@@ -2306,7 +2397,7 @@ class BattleScene:
                 hp = [("  K.O.", BAD)] if f.hp <= 0 else \
                      [(f"  {f.hp}/{f.max_hp}", GOOD if ratio > 0.5 else WARN if ratio > 0.2 else BAD)]
                 here = i == b.active[0]
-                items.append([(str(i + 1), KEY), (("▶" if here else " ") + f.name, WARN if here else DIM if f.hp <= 0 else HI),
+                items.append([(str(i + 1), KEY), (("▶" if here else " ") + shiny_name(f), WARN if here else DIM if f.hp <= 0 else HI),
                               (f" Nv{f.level}", DIM)] + hp)
             title = [("¡Elegí al próximo Pokémon!", WARN)] if self.forced else None
             return grid(title, items, None if self.forced else back, cols, avail, 3)
@@ -2331,7 +2422,9 @@ class BattleScene:
         """Fila 1: barras de HP, estado y equipo (vos a la izquierda, rival a la derecha). Debajo, hasta `avail`
         filas: el mensaje o el menú."""
         (lp, la), (rp, ra) = self._bar(0, cols), self._bar(1, cols)
-        out = f"\x1b[1;1H\x1b[2K{la}\x1b[1;{max(len(lp) + 2, cols - len(rp))}H{ra}"
+        if tw(lp) + 2 + tw(rp) > cols:                     # angosto: la ✨ es lo primero que se saca
+            (lp, la), (rp, ra) = self._bar(0, cols, False), self._bar(1, cols, False)
+        out = f"\x1b[1;1H\x1b[2K{la}\x1b[1;{max(tw(lp) + 2, cols - tw(rp))}H{ra}"
         width = max(10, cols - 1)
         clock = getattr(self.net, "clock_text", None)
         deciding = self.phase == "wait" if self.watch else self.phase in ("main", "fight", "switch")
@@ -2401,11 +2494,11 @@ def main():
     names = list(args.pokemon)
     if args.random:
         names += [str(random.randint(1, 493)) for _ in range(args.random)]
-    if not names:
-        names = load_saved() or DEFAULT
+    saved_names = None if names else load_saved()
+    names = names or saved_names or DEFAULT
 
     loader = Loader(max(0.2, args.scale))
-    loader.request(names, replace=True)
+    loader.request(names, replace=True, roll=not saved_names)    # los guardados vuelven tal cual (shiny o no)
 
     keys = Keys()
     events = Events(EVENTS_FILE)
@@ -2507,7 +2600,7 @@ def main():
         if max(len(mine), len(rival)) > 6:
             flash("Hasta 6 Pokémon por equipo", 4, WARN)
             return
-        walking = [p.name for p in pets]
+        walking = pet_terms(pets)
         mine, rival = ([expand_name(n, walking) for n in team] for team in (mine, rival))
         size = max(len(mine), len(rival)) or 3
         used = set(mine + rival)
@@ -2515,11 +2608,11 @@ def main():
             while not team:
                 for _ in range(size):
                     free = [n for n in walking if n not in used]
-                    pick = random.choice(free) if free else str(random.randint(1, 493))
+                    pick = random.choice(free) if free else roll_term(str(random.randint(1, 493)))
                     team.append(pick)
                     used.add(pick)
         battling = True
-        flash(f"Buscando en internet {', '.join(mine)} vs {', '.join(rival)}... (la primera vez tarda)", 90)
+        flash(f"Buscando en internet {', '.join(mine)} vs {', '.join(rival)}... (la primera vez tarda)".replace("*", " " + SPARK), 90)
         threading.Thread(target=prepare_battle, args=([mine, rival], loader, jobs, walking), daemon=True).start()
 
     def start_gym(trainer):
@@ -2527,7 +2620,7 @@ def main():
         nonlocal battling
         if battling:
             return
-        mine = [p.name for p in pets][:6] or [str(random.randint(1, 493)) for _ in range(3)]
+        mine = pet_terms(pets)[:6] or [roll_term(str(random.randint(1, 493))) for _ in range(3)]
         battling = True
         flash(f"Buscando en internet el combate contra {trainer['nombre']}... (la primera vez tarda)", 90)
         threading.Thread(target=prepare_gym_battle, args=(trainer, mine, loader, jobs), daemon=True).start()
@@ -2576,7 +2669,7 @@ def main():
 
     def idle_block(avail, talking):
         """Ayuda de teclas (dos filas agrupadas si hay lugar y ancho; si no, una sola con lo esencial)."""
-        names = ", ".join(p.name for p in pets) or "(vacío)"
+        names = ", ".join(shiny_name(p) for p in pets) or "(vacío)"
         fights = [opt("b", "batalla"), opt("v", "versus"), opt("g", "gimnasios")]
         team = [opt("a", "agregar"), opt("c", "cambiar"), opt("x", "sacar"), opt("r", "azar")]
         more = [opt("i", "info"), opt("h", "mimar"), opt("o", "opciones"), opt("q", "salir")]
@@ -2732,7 +2825,7 @@ def main():
             if mode == "vsteam":
                 mode, buf = None, ""
             dex = None
-            walking = [p.name for p in pets]
+            walking = pet_terms(pets)
             try:
                 names = partial_team(typed, walking, vs.rules["size"], vs.rules)
             except (OSError, ValueError) as e:         # sin la lista de especies: que lo complete el árbitro
@@ -2837,7 +2930,7 @@ def main():
             if rescale_at and time.time() >= rescale_at:    # cambió la escala (tecla o): los mismos, a la nueva
                 rescale_at = 0.0
                 if pets:
-                    loader.request([p.name for p in pets], replace=True)
+                    loader.request(pet_terms(pets), replace=True)
             while not loader.done.empty():
                 replace, ok, errors = loader.done.get()
                 loader.busy -= 1
@@ -2850,12 +2943,19 @@ def main():
                     for p, was in zip(pets, old):
                         if p.name == was.name:
                             p.x, p.dir = was.x, was.dir
-                save([p.name for p in pets])
+                save(pet_terms(pets))
                 redraw = True
-                if errors:
+                lucky = []
+                while not loader.lucky.empty():
+                    lucky.append(pb.pretty(loader.lucky.get()))
+                if lucky:                                   # salió shiny al azar: que se note
+                    flash((f"¡Salió un {lucky[0]} shiny! {SPARK}" if len(lucky) == 1 else
+                           f"¡Salieron {', '.join(lucky[:-1])} y {lucky[-1]} shiny! {SPARK}")
+                          + ("   No pude: " + " | ".join(errors) if errors else ""), 6, BAD if errors else GOOD)
+                elif errors:
                     flash("No pude: " + " | ".join(errors), 6, BAD)
                 elif ok:
-                    flash(f"{OK_MARK} Listo: " + ", ".join(n for n, _ in ok), 2, GOOD)
+                    flash(f"{OK_MARK} Listo: " + ", ".join(n.replace("*", " " + SPARK) for n, _ in ok), 2, GOOD)
 
             # --- comandos de la otra terminal
             tnow = time.time()
@@ -2996,7 +3096,7 @@ def main():
                                 else:
                                     gone.append(pets.pop(i).name)
                             if gone:
-                                save([p.name for p in pets])
+                                save(pet_terms(pets))
                                 redraw = True
                             txt = ("Chau " + ", ".join(gone)) if gone else ""
                             if missing:
@@ -3013,7 +3113,7 @@ def main():
                                 vs.set_team(vs.prev_team, vs.prev_sprites)
                                 flash(f"Mismo equipo y ataques. Esperando a {vs.peer}...", 4)
                             elif vs:
-                                walking = [p.name for p in pets]
+                                walking = pet_terms(pets)
                                 try:
                                     names = parse_vs_team(parts, walking, vs.rules["size"], vs.rules)
                                 except ValueError as e:             # se queda en el prompt para corregir
@@ -3038,7 +3138,7 @@ def main():
                                 continue
                         elif parts:
                             parts = expand_ranges(parts)
-                            loader.request(parts, replace=(mode == "set"))
+                            loader.request(parts, replace=(mode == "set"), roll=True)
                             flash("Cargando " + (f"{len(parts)}: " if len(parts) > 1 else "") + ", ".join(parts) + "...", 30)
                         mode, buf = None, ""
                     elif ch == "\x1b" and tour_quit_risk("team"):
@@ -3075,7 +3175,7 @@ def main():
                     elif c == "x":
                         mode, buf = "del", ""
                     elif c == "r":
-                        loader.request([str(random.randint(1, 493))], replace=False)
+                        loader.request([str(random.randint(1, 493))], replace=False, roll=True)
                         flash("Buscando uno al azar...", 30)
                     elif c == "b":
                         mode, buf = "battle", ""

@@ -60,6 +60,31 @@ en amarillo (en rojo los últimos 5 segundos). Usan los colores de tu tema, así
 nombres de los ataques van del color de su tipo, en tonos medios que se leen en los dos fondos, y el tipo igual va
 escrito al lado (`ele 90`).
 
+## Shiny ✨
+
+Como en los juegos, a veces sale uno **shiny** (con otros colores): **1 de cada 50** (`SHINY_ODDS` en `pokewalk.py`).
+
+- **Al azar:** cada Pokémon que agregás (`a` con nombre, número o rango, `c`, `r`, los que pasás por línea de comandos)
+  y cada uno que sale al azar en un equipo (la batalla 3 contra 3 al azar, el relleno al azar del versus y del
+  torneo, tu equipo al azar en el gimnasio) tiene su 1/50. Si sale uno caminando, arriba dice
+  `¡Salió un Pikachu shiny! ✨`; en un equipo se ve por la ✨ al lado del nombre. Los líderes del gimnasio usan
+  sus equipos de los juegos: nunca son shiny.
+- **A pedido:** un **`*` al final** lo hace shiny: `pikachu*`, `25*`, y en un rango, todos: `1-10*` (`1*` ... `10*`).
+  Sirve en agregar, cambiar, la batalla (`pika* vs mew`) y el equipo del versus y del torneo (`pika* char`; el nivel
+  lo sigue fijando la sala: `pika*:60` da el error de siempre). La vista previa de agregar ya lo muestra
+  (`#25 pikachu ✨`). En la lista por región (Tab) se elige normal y le agregás el `*` en el prompt.
+- **Los que caminan pelean como caminan:** si tu Pikachu es shiny, en la batalla (`pika`, `pikachu` o Enter solo),
+  el gimnasio y el versus (Enter solo) sale shiny.
+- **Solo se ve:** la ✨ va al lado del nombre (en «Tus Pokémon», las barras de la batalla, el cambio de Pokémon, la
+  elección de ataques y los equipos de la presentación; en una barra muy angosta se saca primero la ✨). **No cambia
+  nada** de la pelea: ni stats, ni ataques, ni las reglas de la sala (un Mewtwo shiny sigue siendo legendario).
+- **Se guarda:** la lista de los que caminan queda como `pikachu*` en `ultimos.txt`; las listas viejas (sin `*`)
+  se leen igual.
+- **En red:** tu rival y los que miran ven a tus shiny como shiny. Un pokewalk anterior (que no conoce los shiny) puede
+  jugar igual con uno nuevo: los ve con los colores normales.
+- Los sprites shiny salen de la carpeta shiny de PMDCollab (`sprite/0025/0000/0001/...`) y quedan en caché aparte.
+  Si de algún Pokémon no hay versión shiny, se ve con los colores normales pero **sigue siendo shiny** (con su ✨).
+
 ## Configuración (`o`)
 
 Con **`o`** se abre la configuración: **`1`-`5`** eligen qué cambiar y **`+`** / **`-`** (o `←` / `→`) cambian el

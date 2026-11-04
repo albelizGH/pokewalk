@@ -137,6 +137,7 @@ class Fighter:
     flinch: bool = False
     fainted: bool = False
     stages: dict = field(default_factory=lambda: {k: 0 for k in STAT_ES})
+    shiny: bool = False                     # solo se ve distinto (sprite y ✨): no cambia nada de la pelea
 
     def __post_init__(self):
         self.max_hp = self.hp = self.stats["hp"]

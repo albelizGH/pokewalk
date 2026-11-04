@@ -293,8 +293,13 @@ def move_from_wire(d):
 
 
 def fighter_to_wire(f):
-    return {"name": f.name, "dex": f.dex, "types": list(f.types), "stats": dict(f.stats), "level": f.level,
-            "moves": [move_to_wire(m) for m in f.moves]}
+    """`shiny` es solo de vista (el sprite y la ✨). Un pokewalk anterior no lo manda (y no lo lee): falta = False,
+    así que no hace falta cambiar PROTO."""
+    d = {"name": f.name, "dex": f.dex, "types": list(f.types), "stats": dict(f.stats), "level": f.level,
+         "moves": [move_to_wire(m) for m in f.moves]}
+    if getattr(f, "shiny", False):
+        d["shiny"] = True
+    return d
 
 
 def fighter_from_wire(d):
@@ -304,7 +309,7 @@ def fighter_from_wire(d):
     types = [t for t in list(d["types"])[:2] if t in pb.TYPES_ES] or ["normal"]
     moves = [move_from_wire(m) for m in list(d["moves"])[:4]] or [pb.FALLBACK_MOVE]
     return pb.Fighter(_text(d["name"], 24) or "???", _int(d["dex"], 1, 2000), types, stats, moves,
-                      level=_int(d.get("level"), 1, 100))
+                      level=_int(d.get("level"), 1, 100), shiny=d.get("shiny") is True)
 
 
 def team_from_wire(lst):
