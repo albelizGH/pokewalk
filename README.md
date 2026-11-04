@@ -34,7 +34,7 @@ py install.py --keys alt+shift+k   # otro atajo
 
 | Tecla | Qué hace |
 |---|---|
-| `a` | agregar: nombre, número o rango (`1-10`, máximo 10 por vez) + Enter. `Tab` (o Enter solo) abre una lista por región (Kanto, Johto...): cada uno aparece con su número de Pokédex: tipeá el número (o parte del nombre) y Enter, `←` `→` cambian de página, Backspace vuelve. La lista con `Tab` también anda al cambiar todos (`c`), en batallas (`b`), info (`i`) y al armar el equipo del versus: lo que elegís se escribe en el prompt |
+| `a` | agregar: nombre, número o rango (`1-10`, máximo 10 por vez) + Enter. `Tab` (o Enter solo) abre una lista por región (Kanto, Johto...): cada uno aparece con su número de Pokédex: tipeá el número (o parte del nombre) y Enter, `←` `→` cambian de página, Backspace vuelve. Un rango como `257-260` muestra justo esos números (de cualquier región) y Enter los escribe todos (máximo 10). La lista con `Tab` también anda al cambiar todos (`c`), en batallas (`b`), info (`i`) y al armar el equipo del versus: lo que elegís se escribe en el prompt y, salvo en info, la lista sigue abierta para elegir otro (Esc vuelve al prompt). Mientras escribís en `a`/`c`, abajo se ve qué se va a agregar (`¿pikahcu?` = no lo conozco) |
 | `c` | cambiar todos: varios separados por espacio + Enter |
 | `x` | sacar: nombre, número o el principio del nombre (`pika`) + Enter. Enter solo saca el último |
 | `r` | agregar uno al azar |
@@ -64,7 +64,7 @@ El hook envuelve `prompt` sin alterar `$?` ni `$LASTEXITCODE`, así que convive 
 
 | Tecla | Qué hace |
 |---|---|
-| `b` | **batalla** por equipos (abajo): `pika char` = 1 contra 1, `pika char vs mew snor` = equipos de hasta 6, Enter solo = 3 contra 3 al azar |
+| `b` | **batalla** por equipos (abajo): `pika char` = 1 contra 1, `pika char vs mew snor` = equipos de hasta 6, Enter solo = 3 contra 3 al azar; en la lista (`Tab`), `Tab` escribe el `vs` y lo que sigue es el rival |
 | `v` | **versus contra un amigo** en la misma red (abajo, "Versus contra un amigo"), o un **torneo** de 3 a 8 (abajo, "Torneo") |
 | `g` | **combates de gimnasio** (abajo): líderes, Alto Mando y campeón de Kanto y Johto |
 | `i` | **info**: tipo, stats base, altura y peso de un Pokémon (Enter solo = uno que camina) |

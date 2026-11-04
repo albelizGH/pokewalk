@@ -43,6 +43,12 @@ participant watching the current match live.
   (no injection; readable by someone who guesses the code — accepted). Works for 1v1 and tournament (organizer stays
   referee). Feasibility evidence (2026-11-04): hivemq 200/200 msgs at 50/s, median ~370 ms (TLS ~420 ms);
   ntfy.sh 429 after ~34 fast posts; broker.emqx.io 44/200; test.mosquitto.org no connect. — route: delegated writer
+- [x] T6 (after T2, before T3) Picker UX: (a) ranges like `257-260` in the Tab regional list show exactly those
+  (even across regions), Enter writes them all, 10-per-action cap shown in the list; (b) live preview under the
+  add/set prompt of what would be added (`#25 pikachu · #4 charmander…`), unknown names flagged before Enter;
+  (c) the list stays open after picking in multi-Pokémon prompts (add, set, battle, vsteam) showing what was picked
+  so far; info still closes on pick; in battle, Tab inside the list writes ` vs ` and switches to picking the rival
+  (header `Tu equipo: … vs Rival: …`); Esc returns to the prompt with everything written. — route: delegated writer
 
 ## Delivery
 User decision: push everything together when all tasks are done (main history rewrite force-push is still the
@@ -172,6 +178,26 @@ user's own command; branch push after that).
     `smoke_tour.py`, `check_rules.py`, `check_t4.py` OK.
   - Not verified: on-screen rendering (spectator HUD, intro texts) in Windows Terminal, real sprite downloads for
     spectators, the main() wiring of keys/jobs (`on_match`, `tmatch`, `to_referee`) beyond compile, real LAN.
+
+### T6 (picker UX) — done, uncommitted at time of writing
+- Route: delegated writer (pokewalk.py + README.md). Test-first exception: no runnable test harness for the
+  curses-like main loop; pure helpers were factored out and checked with a scripted test instead.
+- Design: module-level pure helpers next to `species_by_gen()`: `dex_range`, `range_entries(q, {dex: name})`,
+  `dex_pick_buf`, `add_vs`, `picked_header`, `preview_terms(buf, species=None)` (no network: uses the already
+  loaded `_species`, None if missing), `preview_parts`, `warm_species` (background thread loads the species list once
+  so the preview can appear). Closures stay thin: `dex_found` uses the full species map (`dex_all`) for `N-M`;
+  Enter on a range writes the first 10 (title warns "solo se agregan 10 por vez"); in multi prompts the list stays
+  open, search resets in the same region, a header row shows `Elegidos: …` / `Tu equipo: … vs Rival: …`; info
+  still closes on pick; in battle Tab adds ` vs ` once (title note otherwise), footer says `Tab ahora el rival`.
+  `add_preview()` caches by (mode, buf, species loaded) and draws one extra row under the add/set prompt only when
+  `avail >= 2`. Battle prompt hint and README rows for `a`/`b` updated.
+- Evidence: `py -m py_compile pokewalk.py pokenet.py pokebattle.py` exit 0; scratchpad `check_t6.py` exit 0
+  (257-260 -> blaziken, mudkip, marshtomp, swampert; 150-155 crosses Kanto->Johto; 1-50 -> 50 shown, 10 written;
+  preview `pikachu 4-6` -> #25 #4 #5 #6, `¿pikahcu?` flagged in red, `1-15 mew` -> 10 + "quedan 6 afuera"; no species
+  -> None; repeated picks, `vs` once, headers); `smoke_t2.py`, `smoke_tour.py`, `check_rules.py`, `check_t4.py` exit 0.
+- Not verified: on-screen rendering and key handling in a real terminal (the `main()` closures `dex_key`,
+  `dex_block`, `dex_text`, `add_preview` were only compiled, not driven), narrow-terminal truncation of the longer
+  footer/title, and the background species warm-up timing.
 
 ## Next step
 T3.

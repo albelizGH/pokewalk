@@ -735,7 +735,7 @@ PROMPTS = {
     "add": "Agregar (nombre, número o rango 1-10, Enter;  Tab o Enter solo = lista por región)",
     "set": "Cambiar todos (separados por espacio, rangos 1-10, Enter;  Tab = lista por región)",
     "del": "Sacar (nombre, número o principio del nombre; Enter solo = el último)",
-    "battle": "Batalla (pika char = 1 vs 1;  pika char vs mew snor = equipos;  Enter solo = 3 vs 3 al azar;  Tab = lista)",
+    "battle": "Batalla (pika char = 1 vs 1;  pika char vs mew snor = equipos;  Enter solo = 3 vs 3 al azar;  Tab = lista, y en ella Tab = el rival)",
     "pet": "Mimar a (nombre, número o principio; Enter solo = uno al azar)",
     "info": "Info de (nombre, número o principio; Enter solo = uno que camina;  Tab = lista por región)",
     "vsip": "IP del amigo (ej. 192.168.1.20; Esc vuelve)",
@@ -1148,6 +1148,89 @@ def species_by_gen():
     for r in sorted(csv.DictReader(io.StringIO(raw)), key=lambda r: int(r["id"])):
         out.setdefault(int(r["generation_id"]), []).append((int(r["id"]), r["identifier"]))
     return out
+
+
+# --------------------------------------------------------------------------- lista por región: lógica pura
+def dex_range(q):
+    """`257-260` -> (257, 260); `257-` (a medio tipear) -> (257, 257); otra cosa -> None."""
+    a, sep, b = q.partition("-")
+    if not (sep and a.isdigit() and (b.isdigit() or not b)):
+        return None
+    return tuple(sorted((int(a), int(b or a))))
+
+
+def range_entries(q, species):
+    """Búsqueda `N-M` en la lista: esos números de Pokédex en orden, de cualquier región.
+    `species` es {número: nombre} de todas las regiones. None si `q` no es un rango."""
+    r = dex_range(q)
+    if r is None:
+        return None
+    return [(i, species[i]) for i in sorted(species) if r[0] <= i <= r[1]]
+
+
+def dex_pick_buf(buf, names, single=False):
+    """Escribe lo elegido en la lista en el prompt: `single` (info toma uno solo) reemplaza; si no, se agrega
+    al final y queda un espacio para seguir eligiendo."""
+    if single:
+        return names[0]
+    return (buf.rstrip() + " " if buf.strip() else "") + " ".join(names) + " "
+
+
+def add_vs(buf):
+    """Tab en la lista de la batalla: agrega ` vs ` una sola vez -> (nuevo buf, aviso o None)."""
+    toks = buf.split()
+    if "vs" in toks:
+        return buf, "ya está el vs: ahora elegís al rival"
+    if not toks:
+        return buf, "primero elegí tu equipo"
+    return buf.rstrip() + " vs ", None
+
+
+def picked_header(buf, battle=False):
+    """Lo elegido hasta ahora (sale de lo escrito en el prompt): `Elegidos: a, b` o, en la batalla con vs,
+    `Tu equipo: a, b vs Rival: c`. "" si no hay nada."""
+    toks = buf.split()
+    if battle and "vs" in toks:
+        k = toks.index("vs")
+        return f"Tu equipo: {', '.join(toks[:k]) or '—'} vs Rival: {', '.join(toks[k + 1:]) or '—'}"
+    return "Elegidos: " + ", ".join(toks) if toks else ""
+
+
+def preview_terms(buf, species=None):
+    """Lo que agregaría Enter en add/set, sin red: ([(número | None, nombre | término tal cual)], cuántos quedan
+    afuera por el tope). Usa la lista de especies ya bajada ({nombre: número}); None si todavía no está."""
+    species = _species if species is None else species
+    if not species:
+        return None
+    terms, cut = expand_ranges(buf.split())
+    back = {v: k for k, v in species.items()}
+    out = []
+    for t in terms:
+        t = t.strip().lower()
+        if t.isdigit():
+            out.append((int(t), back[int(t)]) if int(t) in back else (None, t))
+        else:
+            key = t.replace(".", "").replace("'", "")
+            out.append((species[key], key) if key in species else (None, t))
+    return out, cut
+
+
+def preview_parts(entries, cut, label="Enter agrega: "):
+    """Fila de la vista previa: `#25 pikachu · ¿pikahcu?` (lo desconocido en rojo) y cuántos quedan afuera."""
+    out = [(label, DIM)]
+    for k, (d, n) in enumerate(entries):
+        out += ([(" · ", DIM)] if k else []) + ([(f"#{d} {n}", HI)] if d else [(f"¿{n}?", BAD)])
+    if cut:
+        out.append((f"   (máximo {MAX_PER_ADD} por vez: quedan {cut} afuera)", WARN))
+    return out
+
+
+def warm_species():
+    """Hilo: baja la lista de especies (para la vista previa) sin trabar la pantalla."""
+    try:
+        resolve("1")
+    except Exception:
+        pass
 
 
 def load_gyms():
@@ -1693,6 +1776,8 @@ def main():
     gym = None             # menú de combates (tecla g): {"stage": 0..3, "r": región, "g": grupo, "t": entrenador}
     dex = None             # elegir por región (a + Enter solo): {"gen": None | 1..9, "q": filtro, "page": n}
     dex_names = None       # generación -> nombres (se carga la primera vez que se abre)
+    dex_all = {}           # número -> nombre de todas las regiones (para los rangos `N-M` en la lista)
+    pv = {"key": None, "parts": None, "warm": False}   # vista previa de add/set (se calcula al cambiar lo escrito)
     vs = None              # sala de versus en red (tecla v): pokenet.Versus
     tour = None            # torneo (se crea o se entra desde el versus): pokenet.Tournament | TournamentClient
     match_ref = None       # el organizador arbitrando una pelea del torneo: pokenet.MatchReferee
@@ -1882,16 +1967,21 @@ def main():
                 gym = {**gym, "stage": 3, "t": gym_trainers()[i]}
 
     def open_dex():
-        nonlocal dex, dex_names
+        nonlocal dex, dex_names, dex_all
         try:
             dex_names = dex_names or species_by_gen()
+            dex_all = dex_all or {i: n for g in dex_names.values() for i, n in g}
             dex = {"gen": None}
         except (OSError, ValueError, KeyError) as e:
             flash(f"No pude bajar la lista de Pokémon: {e}", 5)
 
     def dex_found():
-        """Los de la región que coinciden con lo tipeado: dígitos = número de Pokédex que empieza así, letras = nombre."""
+        """Los que coinciden con lo tipeado: `N-M` = esos números de cualquier región; si no, de la región:
+        dígitos = número de Pokédex que empieza así, letras = nombre."""
         q = dex["q"]
+        rng = range_entries(q, dex_all)
+        if rng is not None:
+            return rng
         return [(i, n) for i, n in dex_names.get(dex["gen"], [])
                 if (str(i).startswith(q) if q.isdigit() else q in n)]
 
@@ -1910,28 +2000,58 @@ def main():
         """" ★" legendario, " ✦" mítico, "" el resto."""
         return {"legend": " ★", "myth": " ✦"}.get(pn.special_kind(i), "")
 
+    def dex_head():
+        """Lo elegido hasta ahora y el aviso del último Tab (vacío en info, que toma uno solo)."""
+        head = "" if mode == "info" else picked_header(buf, mode == "battle")
+        note = dex.get("note")
+        return head + (("   " if head else "") + f"({note})" if note else "")
+
     def dex_text():
+        head = dex_head()
+        head = head + "  ·  " if head else ""
         if dex["gen"] is None:
-            return "Elegir de:  " + "   ".join(f"{g} {REGIONS[g - 1]}" for g in sorted(dex_names)) + "      Esc vuelve"
-        shown, page, pages, _ = dex_page()
-        return (f"{REGIONS[dex['gen'] - 1]} {page + 1}/{pages}{' [' + dex['q'] + ']' if dex['q'] else ''}:  "
+            return (head + "Elegir de:  " + "   ".join(f"{g} {REGIONS[g - 1]}" for g in sorted(dex_names))
+                    + "      Esc vuelve")
+        shown, page, pages, total = dex_page()
+        rng = dex_range(dex["q"]) is not None
+        where = "Rango" if rng else REGIONS[dex["gen"] - 1]
+        cap = f" (solo se agregan {MAX_PER_ADD} por vez)" if rng and total > MAX_PER_ADD and mode != "info" else ""
+        return (head + f"{where} {page + 1}/{pages}{' [' + dex['q'] + ']' if dex['q'] else ''}{cap}:  "
                 + "   ".join(f"#{i} {n}{dex_mark(i)}" for i, n in shown)
-                + "      número o nombre + Enter   ←→ página   ★ legendario ✦ mítico")
+                + ("      Tab = ahora el rival" if mode == "battle" else "")
+                + "      número, nombre o rango + Enter   ←→ página   ★ legendario ✦ mítico")
 
     def dex_block(avail):
-        """Lista por región en cuadrícula (None si no hay filas libres: se usa `dex_text`)."""
+        """Lista por región en cuadrícula (None si no hay filas libres: se usa `dex_text`). Arriba, si hay
+        lugar, una fila con lo elegido hasta ahora."""
+        head = dex_head()
+        if head and avail >= 2:
+            g = dex_grid(avail - 1)
+            if g:
+                return [seg([(head, GOOD)], max(10, cols - 1))] + g
+        return dex_grid(avail)
+
+    def dex_grid(avail):
+        many = mode != "info"
+        done = (" listo" if many else " vuelve")
         if dex["gen"] is None:
             return grid([("Elegir Pokémon · ¿de qué región?", HI)],
                         [opt(str(g), f"{REGIONS[g - 1]} (gen {g})") for g in sorted(dex_names)],
-                        [("Esc", KEY), (" vuelve", DIM)], cols, avail)
+                        [("Esc", KEY), (done, DIM)], cols, avail)
         shown, page, pages, total = dex_page()
-        title = [(f"{REGIONS[dex['gen'] - 1]} · {total} Pokémon", HI), (f"   página {page + 1}/{pages}", DIM)]
-        if dex["q"]:
+        rng = dex_range(dex["q"]) is not None
+        where = f"Números {dex['q']}" if rng else REGIONS[dex["gen"] - 1]
+        title = [(f"{where} · {total} Pokémon", HI), (f"   página {page + 1}/{pages}", DIM)]
+        if dex["q"] and not rng:
             title += [("   buscando: ", DIM), (dex["q"], WARN)]
+        if rng and total > MAX_PER_ADD and many:
+            title += [(f"   solo se agregan {MAX_PER_ADD} por vez (Enter escribe los primeros {MAX_PER_ADD})", WARN)]
         rules = dex_rules()
-        foot = [("número o nombre", KEY), (" + Enter elige    ", DIM), ("←→", KEY), (" página    ", DIM),
-                ("Backspace", KEY), (" regiones    ", DIM), ("Esc", KEY), (" vuelve    ", DIM),
-                ("★", WARN), (" legendario  ", DIM), ("✦", WARN), (" mítico", DIM)]
+        foot = [("número, nombre o rango 1-10", KEY), (" + Enter elige    ", DIM)]
+        if mode == "battle":
+            foot += [("Tab", KEY), (" ahora el rival    ", DIM)]
+        foot += [("←→", KEY), (" página    ", DIM), ("Backspace", KEY), (" regiones    ", DIM),
+                 ("Esc", KEY), (done + "    ", DIM), ("★", WARN), (" legendario  ", DIM), ("✦", WARN), (" mítico", DIM)]
         if rules and not (rules["legend"] and rules["myth"]):
             foot += [("   (gris = la sala no lo permite)", DIM)]
         items = [[(f"#{i}", KEY), (" " + n, DIM if pn.rule_problem(i, n, rules) else HI), (dex_mark(i), WARN)]
@@ -1939,15 +2059,24 @@ def main():
         return grid(title, items, foot, cols, avail, 3)
 
     def dex_key(ch):
-        """Región (1-9) -> lista: dígitos o letras buscan (por número de Pokédex o nombre), Enter elige
-        el número exacto o el primero que coincide, ←→ pasan de página, Backspace con la búsqueda vacía vuelve.
-        Lo elegido se escribe en el prompt que la abrió (Esc vuelve a ese prompt sin elegir)."""
+        """Región (1-9) -> lista: dígitos o letras buscan (por número de Pokédex o nombre; `N-M` = esos números
+        de cualquier región), Enter elige el número exacto, el primero que coincide o todo el rango (hasta 10),
+        ←→ pasan de página, Backspace con la búsqueda vacía vuelve a las regiones.
+        Lo elegido se escribe en el prompt que la abrió; en los prompts de varios (todos menos info) la lista
+        sigue abierta para elegir otro, y en la batalla Tab escribe ` vs ` (lo que sigue es el rival).
+        Esc vuelve al prompt con todo lo escrito."""
         nonlocal dex, buf, cur
+        note = None
         if ch == "\x1b":
             dex = None
+            return
+        if ch == "\t" and mode == "battle":
+            buf, note = add_vs(buf)
+            cur = len(buf)
         elif dex["gen"] is None:
             if ch == "0" or ch in ("\x08", "\x7f"):
                 dex = None
+                return
             elif ch.isdigit() and int(ch) in dex_names:
                 dex = {"gen": int(ch), "q": "", "page": 0}
         elif ch in ("\x08", "\x7f"):
@@ -1957,18 +2086,37 @@ def main():
             dex = {**dex, "page": max(0, min(pages - 1, page + (1 if ch == K_RIGHT else -1)))}
         elif ch in ("\r", "\n"):
             found = dex_found()
-            exact = [p for p in found if str(p[0]) == dex["q"]]
-            pick = (exact or dex_page()[0] or [None])[0]
-            if pick:
-                dex = None
-                if mode == "info" or not buf.strip():       # info toma uno solo: lo reemplaza
-                    buf = pick[1]
-                else:
-                    buf = buf.rstrip() + " " + pick[1]
-                buf += " " if mode != "info" else ""         # listo para tipear otro (o Tab de nuevo)
+            if dex_range(dex["q"]) is not None:
+                picks = found[:MAX_PER_ADD]                   # el rango entero, con el tope de siempre
+            else:
+                exact = [p for p in found if str(p[0]) == dex["q"]]
+                picks = (exact or dex_page()[0])[:1]
+            if picks:
+                buf = dex_pick_buf(buf, [n for _, n in picks], single=(mode == "info"))
                 cur = len(buf)
+                if mode == "info":                            # info toma uno solo: se cierra
+                    dex = None
+                    return
+                dex = {**dex, "q": "", "page": 0}             # sigue abierta en la misma región
         elif ch.isprintable() and ch != " ":
             dex = {**dex, "q": dex["q"] + ch.lower(), "page": 0}
+        if dex is not None:
+            dex = {**dex, "note": note}
+
+    def add_preview():
+        """Segmentos de la vista previa de add/set (o None). Se recalcula solo si cambió lo escrito o se terminó
+        de bajar la lista de especies; nunca usa la red desde acá (si falta la lista, la baja un hilo aparte)."""
+        if not buf.strip():
+            return None
+        key = (mode, buf, _species is not None)
+        if pv["key"] != key:
+            res = preview_terms(buf)
+            if res is None and not pv["warm"]:
+                pv["warm"] = True
+                threading.Thread(target=warm_species, daemon=True).start()
+            pv["key"] = key
+            pv["parts"] = res and preview_parts(*res, "Enter cambia todos por: " if mode == "set" else "Enter agrega: ")
+        return pv["parts"]
 
     def start_info(parts):
         term = parts[0] if parts else (random.choice(pets).name if pets else str(random.randint(1, 493)))
@@ -2371,6 +2519,10 @@ def main():
                     label = PROMPTS[kind].format(
                         peer=vs.peer, rules=pn.rules_text(vs.rules), size=vs.rules["size"])
                 status = prompt_line(label, buf, cur, cols)
+                if mode in ("add", "set") and not prompt_err and avail >= 2:
+                    line = add_preview()
+                    if line:
+                        block = [status, seg(line, max(10, cols - 1))]
             elif picker:
                 block = picker.lines(cols, avail)
                 status = None if block else status_line(picker.text(cols), cols, True)
