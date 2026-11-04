@@ -163,6 +163,13 @@ user's own command; branch push after that).
   - `smoke_tour.py`, `check_rules.py`, `check_t4.py` re-run unchanged: ALL OK.
   - symtable scan of pokewalk.py / pokenet.py for referenced-but-undefined globals (covers the untested main()
     wiring): none.
+  - Flakiness follow-up (parent saw 3/4 failures): both causes were in the test, not the product. (1) Roster order is
+    admission order and guests connect from parallel threads, so the test now takes ids from `org.players`. (2) A
+    sub-test stopped pumping when the referee said `over`, so that match's `m_over` reached a spectator during the next
+    sub-test and met a loose wait. Per-match filtering in `MatchClient` worked correctly. The test now waits for
+    `everyone_over()` (every connected participant got that match's `over`) before starting the next match. No product
+    change. Result: `smoke_t2.py` 10/10 sequential + 8/8 run 4-at-a-time (4 different roster orders seen);
+    `smoke_tour.py`, `check_rules.py`, `check_t4.py` OK.
   - Not verified: on-screen rendering (spectator HUD, intro texts) in Windows Terminal, real sprite downloads for
     spectators, the main() wiring of keys/jobs (`on_match`, `tmatch`, `to_referee`) beyond compile, real LAN.
 
