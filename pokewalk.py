@@ -2267,7 +2267,7 @@ def main():
         # cargando: cuando llegue ("vspool") se manda solo, con los ataques sorteados
 
     def vs_connect(text):
-        """Tecla v -> 3: `ip` o `ip:puerto`."""
+        """Tecla v -> 2 Buscar salas -> i: `ip` o `ip:puerto`."""
         host, _, port = text.strip().partition(":")
         try:
             port = int(port) if port else pn.TCP_PORT

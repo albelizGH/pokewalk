@@ -110,8 +110,9 @@ Los dos tienen que tener pokewalk (la misma versión) y estar en la misma red Wi
    (`1`-`6`), el nivel (1-100, Enter solo = 50) y si entran **legendarios** y **míticos** (`1` todos, `2` sin
    legendarios, `3` sin míticos, `4` sin ninguno de los dos; Enter = todos). El otro aprieta **`v`** y elige **2 Buscar salas**: pokewalk prueba
    los equipos de tu red y la sala aparece sola en la lista, con sus reglas (también escucha los avisos UDP de las
-   salas). La elige con su número. Si no aparece (por ejemplo en un Wi-Fi que aísla a los equipos entre sí), **3 / `i`
-   Conectar por IP**: se escribe la IP que muestra el que creó la sala. Al entrar, los dos ven las reglas
+   salas). La elige con su número. Si no aparece (por ejemplo en un Wi-Fi que aísla a los equipos entre sí, una red dividida
+   o una sala que abrió en otro puerto), dentro de la búsqueda apretás **`i`** y escribís la IP que muestra el que creó
+   la sala. Al entrar, los dos ven las reglas
    (`Sala: 3 Pokémon · nivel 50 · sin legendarios`).
    - **Legendarios**: los de la historia, uno por juego (Mewtwo, Lugia, Rayquaza, Dialga...).
    - **Míticos**: los de evento (Mew, Celebi, Jirachi, Arceus...).
@@ -148,16 +149,16 @@ cada uno, así que nada impide hacer trampa a propósito.
 Si es la primera vez, el firewall de Windows va a preguntar si dejás a Python usar la red: aceptá en **redes privadas**.
 La sala usa el puerto TCP 5757 y los avisos van por UDP 5758.
 
-### Torneo en la misma red (`v` → 4)
+### Torneo en la misma red (`v` → 3)
 
 Para jugar entre 3 y 8 en la misma red: **eliminación directa**, una pelea por vez, y todos los que no pelean la miran
 en vivo (el organizador también juega).
 
-1. El organizador aprieta **`v`**, elige **4 Crear torneo** y fija las reglas como en una sala de versus (de cuántos
+1. El organizador aprieta **`v`**, elige **3 Crear torneo** y fija las reglas como en una sala de versus (de cuántos
    Pokémon son los equipos, el nivel y si entran legendarios / míticos).
 2. Los demás aprietan **`v`** → **2 Buscar salas**: el torneo aparece aparte, con cuántos hay
    (`Torneo de Ana (192.168.1.5) · 3/8 · 3 Pokémon · nivel 50`). Se elige con su número. También se puede entrar con
-   **3 Conectar por IP** (la IP del organizador): pokewalk se da cuenta solo de que es un torneo.
+   **`i`** dentro de la búsqueda (la IP del organizador): pokewalk se da cuenta solo de que es un torneo.
 3. En la sala todos ven la lista de jugadores y las reglas. Si alguien se va o se le corta la conexión, sale de la lista.
    Esc sale del torneo (si es el organizador, lo cierra para todos).
 4. Con 3 o más, el organizador aprieta **Enter** para empezar: la sala se cierra (ya no entra nadie más) y se sortea
@@ -191,7 +192,7 @@ en vivo (el organizador también juega).
 Todos se conectan solo a la compu del organizador, así que tiene que poder recibir conexiones (el mismo permiso de
 Windows que para crear una sala de versus). Hace falta la misma versión de pokewalk en todas las compus.
 
-### Jugar por internet (sin instalar nada) (`v` → 5)
+### Jugar por internet (sin instalar nada) (`v` → 4)
 
 Para jugar con amigos que **no están en tu red** (cada uno en su casa), versus 1 contra 1 o torneo, sin instalar nada
 más ni tocar el router: los mensajes pasan por un servidor público y gratuito.

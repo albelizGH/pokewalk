@@ -705,8 +705,8 @@ class Versus:
                     "es para que tu amigo pueda conectarse (una sola vez).      Esc cancela")
         if st == "menu":
             warn = "⚠ Sin permiso de Windows (salí y entrá de nuevo y aceptá el aviso) · " if self.noperm else ""
-            return warn + ("Versus en la red local:   1 Crear sala   2 Buscar salas   3 Conectar por IP   "
-                           "4 Crear torneo   5 Por internet      Esc cancela")
+            return warn + ("Versus en la red local:   1 Crear sala   2 Buscar salas   "
+                           "3 Crear torneo   4 Por internet      Esc cancela")
         if st == "net":
             return ("Por internet (con un código):   1 Crear sala   2 Crear torneo   3 Unirse con un código"
                     "      0 volver   Esc cancela")
@@ -730,7 +730,7 @@ class Versus:
                 return f"{self.finder.error}   ·   i = conectar por IP   0 volver   Esc cancela"
             rooms = self.finder.rooms() if self.finder else []
             if not rooms:
-                return "Buscando salas en la red...   (si no aparece: i = conectar por IP)   0 volver   Esc cancela"
+                return "Buscando salas en la red...   (¿no aparece? i = escribí su IP)   0 volver   Esc cancela"
             return "Salas:  " + "   ".join(f"{i + 1} {room_label(r)}" for i, r in enumerate(rooms[:9])) + \
                    "      i = por IP   0 volver   Esc cancela"
         if st == "connecting":
@@ -756,9 +756,9 @@ class Versus:
             if self.noperm:
                 title = "⚠ Sin permiso de Windows (salí y entrá de nuevo y aceptá el aviso) · " + title
             return {"title": title, "warn": self.noperm, "foot": "Esc cancela",
-                    "items": [("1", "Crear sala"), ("2", "Buscar salas"), ("3", "Conectar por IP"),
-                              ("4", f"Crear torneo ({MIN_PLAYERS}-{MAX_PLAYERS} jugadores)"),
-                              ("5", "Por internet, con un código (amigos fuera de tu red)")]}
+                    "items": [("1", "Crear sala"), ("2", "Buscar salas (si no aparece, ahí podés escribir la IP)"),
+                              ("3", f"Crear torneo ({MIN_PLAYERS}-{MAX_PLAYERS} jugadores)"),
+                              ("4", "Por internet, con un código (amigos fuera de tu red)")]}
         if st == "net":
             return {"title": "Por internet: sin instalar nada (pasa por un servidor público gratuito)",
                     "foot": "0  volver      Esc cancela",
@@ -776,7 +776,7 @@ class Versus:
         if st == "hosting" and self.relay:
             return {"title": f"Sala por internet · código  {self.room.code}  · {rules_text(self.rules)}", "items": [],
                     "warn": True,
-                    "foot": "Pasale el código a tu amigo: él entra con v → 5 → 3 «Unirse con un código»      "
+                    "foot": "Pasale el código a tu amigo: él entra con v → 4 → 3 «Unirse con un código»      "
                             "Esc cierra la sala"}
         if st == "hosting":
             ips = ", ".join(self.room.ips) if self.room and self.room.ips else "la de esta compu"
@@ -785,7 +785,7 @@ class Versus:
                     "foot": f"Tu amigo la ve en «Buscar salas», o conecta por IP a {ips}      Esc cierra la sala"}
         if st == "browsing":
             rooms = self.finder.rooms()[:9] if self.finder else []
-            foot = "i  conectar por IP      0  volver      Esc cancela"
+            foot = "¿No aparece la sala?  i  escribí su IP      0  volver      Esc cancela"
             if not rooms:
                 return {"title": "Buscando salas en tu red...", "items": [], "foot": foot}
             return {"title": "Salas en tu red:", "foot": foot,
@@ -797,13 +797,11 @@ class Versus:
         if ch == "\x1b":
             return "cancel"
         if self.stage == "menu":
-            if ch in ("1", "4"):
-                self.stage, self.tourney = "size", ch == "4"
+            if ch in ("1", "3"):
+                self.stage, self.tourney = "size", ch == "3"
             elif ch == "2":
                 self.browse()
-            elif ch in ("3", "i", "I"):
-                return "ip"
-            elif ch == "5":
+            elif ch == "4":
                 self.stage = "net"
         elif self.stage == "net":
             if ch in ("1", "2"):
@@ -1313,7 +1311,7 @@ class Tournament(_TourLobby):
     def _foot(self):
         n = len(self.players)
         if self.code:
-            code = f"Código {self.code} (entran con v → 5 → 3 «Unirse con un código»)"
+            code = f"Código {self.code} (entran con v → 4 → 3 «Unirse con un código»)"
             go = f"Enter  empezar (mínimo {MIN_PLAYERS})" if n >= MIN_PLAYERS else f"Faltan {MIN_PLAYERS - n}"
             return f"{code} · {go}      Esc  cancela el torneo"
         if n >= MIN_PLAYERS:
