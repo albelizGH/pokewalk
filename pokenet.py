@@ -54,6 +54,7 @@ MAX_TEAM = 6
 MAX_PLAYERS = 8         # jugadores de un torneo, contando al organizador
 MIN_PLAYERS = 3         # para empezar un torneo
 # relojes del torneo (los manda el árbitro: un cliente tocado no puede trabar la pelea)
+TIME_LIMIT = False     # torneo sin reloj: ni para armar el equipo ni para cada decisión
 TEAM_SECS = 60          # s para armar el equipo; al vencer, el cliente manda lo que tenga (y el resto al azar)
 TEAM_GRACE = 20         # s más que espera el árbitro (para que ese equipo se baje); después lo completa él al azar
 TURN_SECS = 60          # s para cada decisión de la pelea (más lo que tarda en animarse el turno anterior)
@@ -2155,9 +2156,12 @@ class MatchReferee:
         self.anim = 0.0                 # lo que tarda en animarse el último turno
         self.filling = [None, None]     # equipo al azar del árbitro: None | "busy" | ("ok", equipo) | ("err", texto)
         replay = bool(teams and all(teams))
-        self.deadline = clock() + TEAM_SECS + TEAM_GRACE
-        self._all({"t": "m_prep", "m": self.mid, "a": self.players[0], "b": self.players[1], "rules": tour.rules,
-                   "secs": TEAM_SECS, "replay": replay})
+        self.deadline = clock() + TEAM_SECS + TEAM_GRACE if TIME_LIMIT else None
+        prep = {"t": "m_prep", "m": self.mid, "a": self.players[0], "b": self.players[1], "rules": tour.rules,
+                "replay": replay}
+        if TIME_LIMIT:
+            prep["secs"] = TEAM_SECS
+        self._all(prep)
         if replay:                                      # copias nuevas: con todo el HP y los PP
             self.teams = [team_from_wire([fighter_to_wire(f) for f in t]) for t in teams]
             self._loading()
@@ -2292,12 +2296,16 @@ class MatchReferee:
     # --- el reloj
     def _clock(self, secs):
         """Vuelve a empezar el reloj de las decisiones y les avisa a todos (para que lo muestren)."""
+        if not TIME_LIMIT:
+            return
         self.deadline = self.clock() + secs
         self._all({"t": "m_clock", "m": self.mid, "secs": math.ceil(secs), "who": self.waiting_for(),
                    "lost": [[pid, n] for pid, n in zip(self.ids, self.lost)]})
 
     def tick(self):
         """Lo que pasa cuando vence el reloj: equipos al azar, turnos perdidos."""
+        if self.deadline is None:
+            return
         now = self.clock()
         if self.stage == "teams":
             self._fill(now)
